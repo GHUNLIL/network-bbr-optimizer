@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.24.2"
+VERSION="2026.05.24.3"
 MIB=1048576
 GIB=$((1024 * MIB))
 AUTO_TCP_CAP=$((2047 * MIB))
@@ -200,7 +200,10 @@ show_summary() {
     "$(yn_label "$HANDSHAKE")" "$(yn_label "$LOCAL_TCP_TERMINATION")" "$(yn_label "$TFO_GLOBAL")" "$BUSY_MODE"
   printf '  手动覆盖       : tcp_cap=%sMB, bdp_mult=%s, tcp=%s, udp=%s, cps=%s\n' \
     "$MANUAL_TCP_CAP_MB" "$MANUAL_BDP_MULT" "$TCP_CONNS_OVERRIDE" "$UDP_SESSIONS_OVERRIDE" "$CPS_OVERRIDE"
-  [[ -n "$SERVICE_NAME" ]] && printf '  服务 nofile    : %s\n' "$SERVICE_NAME"
+  if [[ -n "$SERVICE_NAME" ]]; then
+    printf '  服务 nofile    : %s\n' "$SERVICE_NAME"
+  fi
+  return 0
 }
 
 edit_role_scene() {
