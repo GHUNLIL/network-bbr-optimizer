@@ -9,21 +9,21 @@ The script uses a visual arrow-key menu by default. It generates aggressive full
 Recommended interactive one-line command:
 
 ```bash
-sudo bash -c 'bash <(curl -fsSL https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bbr.sh)'
+TMP_BBR=/tmp/network-bbr-optimizer.sh; curl -fsSL -H 'Cache-Control: no-cache' "https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bbr.sh?$(date +%s)" -o "$TMP_BBR" && sudo bash "$TMP_BBR"
 ```
 
-Use the command above for the interactive UI. Avoid `curl ... | bash` for interactive runs because piping can steal stdin from the menu on some systems.
+Use the command above for the interactive UI. It downloads the script to a temporary file first, avoiding stdin and process-substitution issues. Avoid `curl ... | bash` for interactive runs because piping can steal stdin from the menu on some systems.
 
 Generate files only, without applying:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bbr.sh) --dry-run
+TMP_BBR=/tmp/network-bbr-optimizer.sh; curl -fsSL -H 'Cache-Control: no-cache' "https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bbr.sh?$(date +%s)" -o "$TMP_BBR" && bash "$TMP_BBR" --dry-run
 ```
 
 Linear question mode:
 
 ```bash
-sudo bash -c 'bash <(curl -fsSL https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bbr.sh) --quick'
+TMP_BBR=/tmp/network-bbr-optimizer.sh; curl -fsSL -H 'Cache-Control: no-cache' "https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bbr.sh?$(date +%s)" -o "$TMP_BBR" && sudo bash "$TMP_BBR" --quick
 ```
 
 ## Save And Run

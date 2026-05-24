@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.24.1"
+VERSION="2026.05.24.2"
 MIB=1048576
 GIB=$((1024 * MIB))
 AUTO_TCP_CAP=$((2047 * MIB))
@@ -48,6 +48,13 @@ fi
 
 TTY_DEVICE="/dev/tty"
 
+restore_terminal() {
+  tput cnorm 2>/dev/null || true
+  stty sane 2>/dev/null || true
+}
+trap restore_terminal EXIT
+trap 'restore_terminal; exit 130' INT TERM
+
 has_tty() {
   [[ -r "$TTY_DEVICE" && -w "$TTY_DEVICE" ]]
 }
@@ -64,10 +71,11 @@ prompt_read() {
 
 read_key() {
   local __var="$1" key rest
-  has_tty || return 1
-  IFS= read -rsn1 key < "$TTY_DEVICE" || return 1
+  local input="$TTY_DEVICE"
+  has_tty || input="/dev/stdin"
+  IFS= read -rsn1 key < "$input" || return 1
   if [[ "$key" == $'\e' ]]; then
-    IFS= read -rsn2 -t 0.05 rest < "$TTY_DEVICE" || rest=""
+    IFS= read -rsn2 -t 0.2 rest < "$input" || rest=""
     key+="$rest"
   fi
   printf -v "$__var" '%s' "$key"
@@ -100,8 +108,8 @@ select_option() {
 
     read_key key || return 1
     case "$key" in
-      $'\e[A'|k|K) cursor=$(((cursor + count - 1) % count)) ;;
-      $'\e[B'|j|J) cursor=$(((cursor + 1) % count)) ;;
+      $'\e[A'|$'\eOA'|k|K) cursor=$(((cursor + count - 1) % count)) ;;
+      $'\e[B'|$'\eOB'|j|J) cursor=$(((cursor + 1) % count)) ;;
       ""|$'\r'|$'\n') printf '%s' "${options[$cursor]}"; return 0 ;;
       q|Q) printf '%s' "$default"; return 0 ;;
       [1-9])
@@ -270,6 +278,7 @@ interactive_menu() {
     "生成配置"
     "退出"
   )
+  tput civis 2>/dev/null || true
   while true; do
     banner
     show_summary
@@ -286,8 +295,8 @@ interactive_menu() {
     choice=""
     if read_key key; then
       case "$key" in
-        $'\e[A'|k|K) cursor=$(((cursor + count - 1) % count)); continue ;;
-        $'\e[B'|j|J) cursor=$(((cursor + 1) % count)); continue ;;
+        $'\e[A'|$'\eOA'|k|K) cursor=$(((cursor + count - 1) % count)); continue ;;
+        $'\e[B'|$'\eOB'|j|J) cursor=$(((cursor + 1) % count)); continue ;;
         ""|$'\r'|$'\n') choice=$((cursor + 1)) ;;
         [1-7]) choice="$key"; cursor=$((choice - 1)) ;;
         q|Q) exit 0 ;;
