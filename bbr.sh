@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.24"
+VERSION="2026.05.24.1"
 MIB=1048576
 GIB=$((1024 * MIB))
 AUTO_TCP_CAP=$((2047 * MIB))
@@ -46,13 +46,81 @@ else
   RESET=""
 fi
 
+TTY_DEVICE="/dev/tty"
+
+has_tty() {
+  [[ -r "$TTY_DEVICE" && -w "$TTY_DEVICE" ]]
+}
+
+prompt_read() {
+  local __var="$1" prompt="$2"
+  if has_tty; then
+    printf '%s' "$prompt" > "$TTY_DEVICE"
+    IFS= read -r "$__var" < "$TTY_DEVICE"
+  else
+    IFS= read -r -p "$prompt" "$__var"
+  fi
+}
+
+read_key() {
+  local __var="$1" key rest
+  has_tty || return 1
+  IFS= read -rsn1 key < "$TTY_DEVICE" || return 1
+  if [[ "$key" == $'\e' ]]; then
+    IFS= read -rsn2 -t 0.05 rest < "$TTY_DEVICE" || rest=""
+    key+="$rest"
+  fi
+  printf -v "$__var" '%s' "$key"
+}
+
+select_option() {
+  local prompt="$1" default="$2" key count cursor=0 i
+  shift 2
+  local options=("$@")
+  count="${#options[@]}"
+  (( count > 0 )) || return 1
+  for ((i=0; i<count; i++)); do
+    if [[ "${options[$i]}" == "$default" ]]; then
+      cursor="$i"
+      break
+    fi
+  done
+
+  while true; do
+    printf '\033[H\033[2J' > "$TTY_DEVICE"
+    printf '%s%s%s\n' "$BOLD" "$prompt" "$RESET" > "$TTY_DEVICE"
+    printf '%s↑/↓ 或 j/k 选择，Enter 确认，q 返回/退出%s\n\n' "$DIM" "$RESET" > "$TTY_DEVICE"
+    for ((i=0; i<count; i++)); do
+      if (( i == cursor )); then
+        printf '  %s> %s%s\n' "$GREEN" "${options[$i]}" "$RESET" > "$TTY_DEVICE"
+      else
+        printf '    %s\n' "${options[$i]}" > "$TTY_DEVICE"
+      fi
+    done
+
+    read_key key || return 1
+    case "$key" in
+      $'\e[A'|k|K) cursor=$(((cursor + count - 1) % count)) ;;
+      $'\e[B'|j|J) cursor=$(((cursor + 1) % count)) ;;
+      ""|$'\r'|$'\n') printf '%s' "${options[$cursor]}"; return 0 ;;
+      q|Q) printf '%s' "$default"; return 0 ;;
+      [1-9])
+        if (( key >= 1 && key <= count )); then
+          printf '%s' "${options[$((key - 1))]}"
+          return 0
+        fi
+        ;;
+    esac
+  done
+}
+
 hr() {
   printf '%*s\n' "${COLUMNS:-80}" '' | tr ' ' '-'
 }
 
 pause_ui() {
   local _
-  read -r -p "按 Enter 继续..." _ || true
+  prompt_read _ "按 Enter 继续..." || true
 }
 
 clear_ui() {
@@ -192,20 +260,44 @@ edit_capacity() {
 }
 
 interactive_menu() {
-  local choice
+  local choice key cursor=5 count=7 i
+  local options=(
+    "角色/场景/业务"
+    "链路带宽/RTT/丢包抖动"
+    "网卡/RPS/busy_poll"
+    "TFO/握手优化/应用层说明"
+    "并发容量/高级覆盖"
+    "生成配置"
+    "退出"
+  )
   while true; do
     banner
     show_summary
     hr
-    printf '  1) 角色/场景/业务\n'
-    printf '  2) 链路带宽/RTT/丢包抖动\n'
-    printf '  3) 网卡/RPS/busy_poll\n'
-    printf '  4) TFO/握手优化/应用层说明\n'
-    printf '  5) 并发容量/高级覆盖\n'
-    printf '  6) 生成配置\n'
-    printf '  7) 退出\n'
-    read -r -p "请选择 [6]: " choice || true
-    choice="${choice:-6}"
+    printf '%s↑/↓ 或 j/k 选择，Enter 确认；也可按 1-7，q 退出%s\n\n' "$DIM" "$RESET"
+    for ((i=0; i<count; i++)); do
+      if (( i == cursor )); then
+        printf '  %s> %d) %s%s\n' "$GREEN" $((i + 1)) "${options[$i]}" "$RESET"
+      else
+        printf '    %d) %s\n' $((i + 1)) "${options[$i]}"
+      fi
+    done
+
+    choice=""
+    if read_key key; then
+      case "$key" in
+        $'\e[A'|k|K) cursor=$(((cursor + count - 1) % count)); continue ;;
+        $'\e[B'|j|J) cursor=$(((cursor + 1) % count)); continue ;;
+        ""|$'\r'|$'\n') choice=$((cursor + 1)) ;;
+        [1-7]) choice="$key"; cursor=$((choice - 1)) ;;
+        q|Q) exit 0 ;;
+        *) continue ;;
+      esac
+    else
+      prompt_read choice "请选择 [6]: " || true
+      choice="${choice:-6}"
+    fi
+
     case "$choice" in
       1) edit_role_scene ;;
       2) edit_link ;;
@@ -272,7 +364,7 @@ Network BBR Optimizer bbr.sh
 交互式 Linux 网络优化脚本，面向极致专用转发节点和落地节点。
 
 用法:
-  bash bbr.sh             # 菜单式交互界面，先生成配置，再确认是否应用
+  bash bbr.sh             # 上下键可视化菜单，先生成配置，再确认是否应用
   bash bbr.sh --quick     # 线性问答模式
   bash bbr.sh --dry-run   # 只生成配置文件，不应用
   bash bbr.sh --apply     # 生成后默认询问应用
@@ -303,14 +395,18 @@ is_root() { [[ "${EUID:-$(id -u)}" -eq 0 ]]; }
 
 ask() {
   local prompt="$1" default="$2" value
-  read -r -p "$prompt [$default]: " value || true
+  prompt_read value "$prompt [$default]: " || true
   printf '%s' "${value:-$default}"
 }
 
 ask_yes_no() {
   local prompt="$1" default="$2" value
+  if has_tty && [[ -t 1 ]]; then
+    select_option "$prompt" "$default" yes no
+    return
+  fi
   while true; do
-    read -r -p "$prompt [$default]: " value || true
+    prompt_read value "$prompt [$default]: " || true
     value="${value:-$default}"
     case "$value" in
       y|Y|yes|YES|Yes) printf 'yes'; return ;;
@@ -323,8 +419,12 @@ ask_yes_no() {
 ask_choice() {
   local prompt="$1" default="$2" value valid
   shift 2
+  if has_tty && [[ -t 1 ]]; then
+    select_option "$prompt" "$default" "$@"
+    return
+  fi
   while true; do
-    read -r -p "$prompt [$default]: " value || true
+    prompt_read value "$prompt [$default]: " || true
     value="${value:-$default}"
     for valid in "$@"; do
       if [[ "$value" == "$valid" ]]; then
@@ -535,7 +635,7 @@ UDP_SESSIONS_OVERRIDE=0
 CPS_OVERRIDE=0
 SERVICE_NAME=""
 
-if [[ "$UI_MODE" == "menu" && -t 0 ]]; then
+if [[ "$UI_MODE" == "menu" && ( -t 0 || -r "$TTY_DEVICE" ) ]]; then
   interactive_menu
 else
   linear_wizard
