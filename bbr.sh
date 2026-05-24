@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.24.3"
+VERSION="2026.05.24.4"
 MIB=1048576
 GIB=$((1024 * MIB))
 AUTO_TCP_CAP=$((2047 * MIB))
@@ -70,15 +70,15 @@ prompt_read() {
 }
 
 read_key() {
-  local __var="$1" key rest
+  local __var="$1" pressed rest
   local input="$TTY_DEVICE"
   has_tty || input="/dev/stdin"
-  IFS= read -rsn1 key < "$input" || return 1
-  if [[ "$key" == $'\e' ]]; then
+  IFS= read -rsn1 pressed < "$input" || return 1
+  if [[ "$pressed" == $'\e' ]]; then
     IFS= read -rsn2 -t 0.2 rest < "$input" || rest=""
-    key+="$rest"
+    pressed+="$rest"
   fi
-  printf -v "$__var" '%s' "$key"
+  printf -v "$__var" '%s' "$pressed"
 }
 
 select_option() {
