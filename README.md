@@ -4,6 +4,8 @@
 
 默认目标是“极致满速 + 可控低抖动”：让测速、新连接和长 RTT 链路尽快跑满，同时限制队列深度，避免无意义堆积。脚本会生成并可应用 BBR、sysctl、RPS、conntrack、initcwnd、nofile、TCP Fast Open 等配置；应用层 mux/smux/yamux/multiplex 默认不会开启。
 
+默认业务按 `TCP+UDP 双优化` 处理，不只偏 TCP；UDP 会话、UDP socket 缓冲、netdev 队列和 conntrack UDP 容量都会一起计算。
+
 ## 一键运行
 
 推荐使用下面这个命令进入上下键可视化菜单：

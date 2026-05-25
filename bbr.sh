@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.25.5"
+VERSION="2026.05.25.6"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -99,7 +99,7 @@ choice_label() {
     plain) printf '普通 nftables 转发 - 通用内核转发画像' ;;
     speed) printf '极致满速 - 新连接和测速尽快跑满，同时控制队列' ;;
     throughput) printf '极致吞吐 - 更偏大流量长时间持续吞吐' ;;
-    mixed) printf '混合代理/中转 - TCP/UDP 混合业务' ;;
+    mixed) printf 'TCP+UDP 双优化 - 默认同时照顾 TCP 满速和 UDP 会话' ;;
     tcp) printf 'TCP 长连接 - 长连接、代理隧道或大流量 TCP' ;;
     udp_game) printf 'UDP 游戏/实时 - 游戏、语音、实时 UDP' ;;
     web) printf 'Web/HTTPS - 网站、API、短连接 HTTPS' ;;
@@ -224,7 +224,7 @@ target_label() {
 
 business_label() {
   case "${BUSINESS:-mixed}" in
-    mixed) printf '混合代理/中转' ;;
+    mixed) printf 'TCP+UDP 双优化' ;;
     tcp) printf 'TCP 长连接' ;;
     udp_game) printf 'UDP 游戏/实时' ;;
     web) printf 'Web/HTTPS' ;;
@@ -907,6 +907,10 @@ elif (( MEM_TOTAL_KB < 2048 * 1024 )); then
 fi
 
 case "$BUSINESS" in
+  mixed)
+    UDP_SESSIONS=$((UDP_SESSIONS * 13 / 10))
+    CPS=$((CPS * 11 / 10))
+    ;;
   udp_game)
     UDP_SESSIONS=$((UDP_SESSIONS * 2))
     CPS=$((CPS * 3 / 2))
@@ -965,6 +969,7 @@ else
   BDP_MULT=10
 fi
 BDP_MULT=$((BDP_MULT + 2))
+[[ "$BUSINESS" == "mixed" ]] && BDP_MULT=$((BDP_MULT + 1))
 [[ "$BUSINESS" == "udp_game" ]] && BDP_MULT=$((BDP_MULT + 1))
 (( LOSS_BP >= 100 )) && BDP_MULT=$((BDP_MULT + 1))
 (( LOSS_BP >= 300 )) && BDP_MULT=$((BDP_MULT + 1))
@@ -1056,19 +1061,24 @@ fi
 LOWAT=$(clamp $((MBW * LOWAT_FACTOR)) "$LOWAT_LO" "$LOWAT_HI")
 
 UDP_FACTOR=8192
+[[ "$BUSINESS" == "mixed" ]] && UDP_FACTOR=12288
 [[ "$TARGET" == "throughput" ]] && UDP_FACTOR=12288
 [[ "$BUSINESS" == "udp_game" ]] && UDP_FACTOR=16384
 UDPR="$BDP"
+[[ "$BUSINESS" == "mixed" ]] && UDPR=$((BDP * 3 / 2))
 [[ "$BUSINESS" == "udp_game" ]] && UDPR=$((BDP * 2))
 UDPR=$(max "$UDPR" $((MBW * UDP_FACTOR)))
 if [[ "$BUSINESS" == "udp_game" ]]; then
   UDP_SOCKET_CAP="$TCP_MAX"
+elif [[ "$BUSINESS" == "mixed" ]]; then
+  UDP_SOCKET_CAP=$((TCP_MAX * 3 / 4))
 else
   UDP_SOCKET_CAP=$((TCP_MAX / 2))
 fi
 UDP_SOCKET_CAP=$(max "$UDP_SOCKET_CAP" "$MIB")
 UDPR=$(clamp "$UDPR" "$MIB" "$UDP_SOCKET_CAP")
 UDP_MIN=4096
+[[ "$BUSINESS" == "mixed" ]] && UDP_MIN=16384
 [[ "$BUSINESS" == "udp_game" ]] && UDP_MIN=16384
 if [[ "$TARGET" == "throughput" || "$UDP_SESSIONS" -gt 50000 ]]; then UDP_MIN=8192; fi
 UDP_MIN=$(clamp "$UDP_MIN" 4096 65536)
@@ -1144,6 +1154,7 @@ NETDEV_RAW=$((MBW * 16 + CPS * 8 + UDP_SESSIONS / 8))
 NETDEV_RAW=$((NETDEV_RAW * 15 / 10))
 [[ "$SCENE" == "ix" ]] && NETDEV_RAW=$((NETDEV_RAW * 2))
 [[ "$TARGET" == "throughput" ]] && NETDEV_RAW=$((NETDEV_RAW * 15 / 10))
+[[ "$BUSINESS" == "mixed" ]] && NETDEV_RAW=$((NETDEV_RAW + UDP_SESSIONS / 6))
 [[ "$BUSINESS" == "udp_game" ]] && NETDEV_RAW=$((NETDEV_RAW + UDP_SESSIONS / 3))
 NETDEV_BACKLOG=$(pow2ceil "$(clamp "$NETDEV_RAW" 4096 "$NETDEV_BACKLOG_CAP")")
 
@@ -1153,6 +1164,7 @@ if [[ "$ROLE" == "landing" && "$LANDING_ROUTES" == "yes" ]]; then CT_NEEDED="yes
 CT_RAW=$((TCP_CONNS + UDP_SESSIONS * 2 + CPS * 90))
 [[ "$SCENE" == "ix" ]] && CT_RAW=$((CT_RAW * 15 / 10))
 [[ "$TARGET" == "throughput" ]] && CT_RAW=$((CT_RAW * 125 / 100))
+[[ "$BUSINESS" == "mixed" ]] && CT_RAW=$((CT_RAW + UDP_SESSIONS / 2))
 [[ "$BUSINESS" == "udp_game" ]] && CT_RAW=$((CT_RAW + UDP_SESSIONS))
 CT_MEM_CAP=$((MEM_TOTAL_BYTES * MEM_PCT / 100 / 512))
 CT_UPPER=$(min 16777216 "$(max 131072 "$CT_MEM_CAP")")
@@ -1171,12 +1183,14 @@ CT_TCP_EST=900
 [[ "$BUSINESS" == "web" ]] && CT_TCP_EST=1200
 (( TCP_CONNS > 500000 )) && CT_TCP_EST=600
 CT_UDP=45
+[[ "$BUSINESS" == "mixed" ]] && CT_UDP=35
 [[ "$BUSINESS" == "udp_game" ]] && CT_UDP=30
 CT_UDP_STREAM=180
 
 TXQUEUELEN=$((MBW / 2 + MAXRTT * 10 + UDP_SESSIONS / 1000))
 TXQUEUELEN=$((TXQUEUELEN * 15 / 10))
 [[ "$TARGET" == "throughput" ]] && TXQUEUELEN=$((TXQUEUELEN * 13 / 10))
+[[ "$BUSINESS" == "mixed" ]] && TXQUEUELEN=$((TXQUEUELEN + 250))
 [[ "$BUSINESS" == "udp_game" ]] && TXQUEUELEN=$((TXQUEUELEN + 500))
 TXQUEUELEN=$(clamp "$TXQUEUELEN" 500 "$TXQUEUELEN_CAP")
 
