@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.25.3"
+VERSION="2026.05.25.4"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -1120,6 +1120,14 @@ CT_MEM_CAP=$((MEM_TOTAL_BYTES * MEM_PCT / 100 / 512))
 CT_UPPER=$(min 16777216 "$(max 131072 "$CT_MEM_CAP")")
 NF_CONNTRACK_MAX=$(clamp "$(pow2ceil "$CT_RAW")" 131072 "$CT_UPPER")
 NF_CONNTRACK_BUCKETS=$(pow2ceil "$(clamp "$NF_CONNTRACK_MAX" 32768 16777216)")
+CT_RESET_RAW=$((TCP_CONNS / 2 + UDP_SESSIONS + CPS * 30))
+CT_RESET_MEM_CAP=$((MEM_TOTAL_BYTES / 8192))
+CT_RESET_UPPER=$(min 2097152 "$(max 131072 "$CT_RESET_MEM_CAP")")
+NF_CONNTRACK_RESET_MAX=$(clamp "$(pow2ceil "$CT_RESET_RAW")" 131072 "$CT_RESET_UPPER")
+CT_COUNT_NOW="$(read_sysctl net.netfilter.nf_conntrack_count 0)"
+if [[ "$CT_COUNT_NOW" =~ ^[0-9]+$ ]] && (( CT_COUNT_NOW > 0 )); then
+  NF_CONNTRACK_RESET_MAX=$(max "$NF_CONNTRACK_RESET_MAX" "$(pow2ceil $((CT_COUNT_NOW * 2)))")
+fi
 
 CT_TCP_EST=900
 [[ "$BUSINESS" == "web" ]] && CT_TCP_EST=1200
@@ -1179,6 +1187,7 @@ if [[ -n "$TFO_VALUE" ]]; then
   [[ -n "$TFO_BLACKHOLE" ]] && emit_sysctl net.ipv4.tcp_fastopen_blackhole_timeout_sec "$TFO_BLACKHOLE"
 else
   printf '# 已跳过: 纯内核转发且本机不终止 TCP 时，tcp_fastopen 对被转发连接没有实际帮助\n' >> "$SYSCTL_OUT"
+  emit_sysctl net.ipv4.tcp_fastopen 0
 fi
 emit_sysctl net.ipv4.tcp_mtu_probing 1
 emit_sysctl net.ipv4.tcp_rfc1337 1
@@ -1217,6 +1226,13 @@ if [[ "$ROLE" == "forwarding" || "$LANDING_ROUTES" == "yes" ]]; then
   if [[ "$IPV6_RA" == "yes" ]]; then
     printf '# IPv6 默认路由依赖 %s 的 RA：如需保留默认路由，请在接口级单独设置 accept_ra=2，不要写到 all/default。\n' "$DEFAULT_IFACE" >> "$SYSCTL_OUT"
   fi
+else
+  printf '# 落地节点未启用 NAT/路由：显式关闭以前可能残留的内核转发。\n' >> "$SYSCTL_OUT"
+  emit_sysctl net.ipv4.ip_forward 0
+  emit_sysctl net.ipv6.conf.all.forwarding 0
+  emit_sysctl net.ipv6.conf.default.forwarding 0
+  emit_sysctl net.ipv4.conf.all.rp_filter "$RP_FILTER"
+  emit_sysctl net.ipv4.conf.default.rp_filter "$RP_FILTER"
 fi
 
 if [[ "$CT_NEEDED" == "yes" ]]; then
@@ -1224,11 +1240,17 @@ if [[ "$CT_NEEDED" == "yes" ]]; then
   emit_sysctl net.netfilter.nf_conntrack_tcp_timeout_established "$CT_TCP_EST"
   emit_sysctl net.netfilter.nf_conntrack_udp_timeout "$CT_UDP"
   emit_sysctl net.netfilter.nf_conntrack_udp_timeout_stream "$CT_UDP_STREAM"
+else
+  printf '# 当前角色不需要本脚本放大 conntrack；这里写入安全回落值，覆盖旧转发配置残留。\n' >> "$SYSCTL_OUT"
+  emit_sysctl net.netfilter.nf_conntrack_max "$NF_CONNTRACK_RESET_MAX"
 fi
 
 if [[ -n "$BUSY_POLL" ]]; then
   emit_sysctl net.core.busy_poll "$BUSY_POLL"
   emit_sysctl net.core.busy_read "$BUSY_POLL"
+else
+  emit_sysctl net.core.busy_poll 0
+  emit_sysctl net.core.busy_read 0
 fi
 
 cat > "$LIMITS_OUT" <<EOF
@@ -1246,6 +1268,11 @@ EOF
 if [[ "$CT_NEEDED" == "yes" ]]; then
   cat > "$MODPROBE_OUT" <<EOF
 options nf_conntrack hashsize=$NF_CONNTRACK_BUCKETS
+EOF
+else
+  cat > "$MODPROBE_OUT" <<'EOF'
+# 当前配置不需要本脚本设置 nf_conntrack hashsize。
+# 这个文件会覆盖旧版脚本留下的 hashsize 配置，避免转发配置切换到落地配置后继续残留。
 EOF
 fi
 
@@ -1341,13 +1368,14 @@ TFO黑洞检测=${TFO_BLACKHOLE:-已跳过}
 需要conntrack=$CT_NEEDED
 nf_conntrack_max=$NF_CONNTRACK_MAX
 nf_conntrack_buckets=$NF_CONNTRACK_BUCKETS
+不需要conntrack时的安全回落上限=$NF_CONNTRACK_RESET_MAX
 
 应用层 mux/multiplex：本脚本不会开启。
 EOF
 
 printf '\n已生成文件:\n'
 printf '  %s\n' "$SYSCTL_OUT" "$LIMITS_OUT" "$SYSTEMD_OUT" "$ROUTE_OUT" "$NIC_OUT" "$REPORT_OUT"
-[[ -f "$MODPROBE_OUT" ]] && printf '  %s\n' "$MODPROBE_OUT"
+printf '  %s\n' "$MODPROBE_OUT"
 [[ -n "${SERVICE_DROPIN:-}" ]] && printf '  %s\n' "$SERVICE_DROPIN"
 
 if [[ "$APPLY_MODE" == "no" ]]; then
@@ -1377,9 +1405,7 @@ write_rollback "$BACKUP_DIR"
 install_file "$SYSCTL_OUT" /etc/sysctl.d/99-network-optimize.conf 0644 "$BACKUP_DIR"
 install_file "$LIMITS_OUT" /etc/security/limits.d/99-network-optimize.conf 0644 "$BACKUP_DIR"
 install_file "$SYSTEMD_OUT" /etc/systemd/system.conf.d/99-network-optimize.conf 0644 "$BACKUP_DIR"
-if [[ "$CT_NEEDED" == "yes" ]]; then
-  install_file "$MODPROBE_OUT" /etc/modprobe.d/nf_conntrack.conf 0644 "$BACKUP_DIR"
-fi
+install_file "$MODPROBE_OUT" /etc/modprobe.d/nf_conntrack.conf 0644 "$BACKUP_DIR"
 install_file "$ROUTE_OUT" /usr/local/sbin/network-optimize-route.sh 0755 "$BACKUP_DIR"
 install_file "$NIC_OUT" /usr/local/sbin/network-optimize-nic.sh 0755 "$BACKUP_DIR"
 
@@ -1417,6 +1443,18 @@ if [[ -n "${SERVICE_DROPIN:-}" ]]; then
 fi
 
 sysctl --system
+if [[ "$CT_NEEDED" != "yes" ]] && sysctl_exists net.netfilter.nf_conntrack_max; then
+  CT_CURRENT="$(read_sysctl net.netfilter.nf_conntrack_max 0)"
+  CT_COUNT="$(read_sysctl net.netfilter.nf_conntrack_count 0)"
+  if [[ "$CT_CURRENT" =~ ^[0-9]+$ && "$CT_COUNT" =~ ^[0-9]+$ ]] && (( CT_CURRENT > NF_CONNTRACK_RESET_MAX )); then
+    if (( CT_COUNT < NF_CONNTRACK_RESET_MAX )); then
+      sysctl -w "net.netfilter.nf_conntrack_max=$NF_CONNTRACK_RESET_MAX" >/dev/null 2>&1 || \
+        warn "nf_conntrack_max 当前运行值未能降回 $NF_CONNTRACK_RESET_MAX，重启后会按系统默认重新计算。"
+    else
+      warn "当前 conntrack 已用 $CT_COUNT，暂不把 nf_conntrack_max 降到 $NF_CONNTRACK_RESET_MAX，避免影响现有连接。"
+    fi
+  fi
+fi
 systemctl daemon-reexec 2>/dev/null || true
 systemctl daemon-reload 2>/dev/null || true
 systemctl enable --now network-optimize-route.service 2>/dev/null || true
