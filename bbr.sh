@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.25.1"
+VERSION="2026.05.25.2"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -31,6 +31,7 @@ UI_MODE="menu"
 OUT_DIR=""
 OUT_DIR_AUTO="no"
 CLEAN_OUTPUTS="no"
+DRAFT_DIRTY="no"
 
 log() { printf '[*] %s\n' "$*"; }
 warn() { printf '[!] %s\n' "$*" >&2; }
@@ -232,8 +233,8 @@ business_label() {
 }
 
 show_summary() {
-  printf '%s本次配置草案%s\n' "$BOLD" "$RESET"
-  printf '  说明            : 这里不是系统已生效值；网卡/队列/CPU 为自动探测，其余为默认值或你的选择。\n'
+  printf '%s待生效配置草案%s\n' "$BOLD" "$RESET"
+  printf '  说明            : 这里是你修改后的待生成/待应用配置，不是当前系统已生效值。\n'
   printf '  角色/场景      : %s / %s\n' "$(role_label)" "$(scene_label)"
   printf '  目标/业务      : %s / %s\n' "$(target_label)" "$(business_label)"
   printf '  带宽 Mbps      : 上行 %s / 下行 %s\n' "$UP_MBPS" "$DOWN_MBPS"
@@ -262,10 +263,9 @@ print_live_sysctl() {
   fi
 }
 
-show_live_status() {
-  banner
+show_live_status_body() {
   printf '%s系统已生效参数%s\n' "$BOLD" "$RESET"
-  printf '  说明            : 以下为从当前系统实时读取的值，不是本次配置草案。\n'
+  printf '  说明            : 以下为从当前系统实时读取的值；修改 1-5 项后，主界面会切换为待生效配置草案。\n'
   printf '  默认网卡        : %s / RX %s / TX %s / CPU %s\n\n' "$DEFAULT_IFACE" "$RX_QUEUES" "$TX_QUEUES" "$CPU_COUNT"
   print_live_sysctl net.ipv4.tcp_congestion_control
   print_live_sysctl net.core.default_qdisc
@@ -286,6 +286,11 @@ show_live_status() {
   ip route show default 2>/dev/null || true
   ip -6 route show default 2>/dev/null || true
   printf '\n'
+}
+
+show_live_status() {
+  banner
+  show_live_status_body
   pause_ui
 }
 
@@ -394,7 +399,7 @@ edit_capacity() {
 }
 
 interactive_menu() {
-  local choice key cursor=5 count=9 i
+  local choice key cursor=0 count=9 i answer
   local options=(
     "角色/场景/业务"
     "链路带宽/RTT/丢包抖动"
@@ -409,7 +414,11 @@ interactive_menu() {
   tput civis 2>/dev/null || true
   while true; do
     banner
-    show_summary
+    if [[ "$DRAFT_DIRTY" == "yes" ]]; then
+      show_summary
+    else
+      show_live_status_body
+    fi
     hr
     printf '%s↑/↓ 或 j/k 选择，Enter 确认；也可按 1-9，q 退出%s\n\n' "$DIM" "$RESET"
     for ((i=0; i<count; i++)); do
@@ -436,12 +445,24 @@ interactive_menu() {
     fi
 
     case "$choice" in
-      1) edit_role_scene ;;
-      2) edit_link ;;
-      3) edit_runtime ;;
-      4) edit_handshake ;;
-      5) edit_capacity ;;
-      6) break ;;
+      1) edit_role_scene; DRAFT_DIRTY="yes" ;;
+      2) edit_link; DRAFT_DIRTY="yes" ;;
+      3) edit_runtime; DRAFT_DIRTY="yes" ;;
+      4) edit_handshake; DRAFT_DIRTY="yes" ;;
+      5) edit_capacity; DRAFT_DIRTY="yes" ;;
+      6)
+        if [[ "$DRAFT_DIRTY" == "yes" ]]; then
+          break
+        fi
+        banner
+        printf '当前主界面显示的是系统已生效参数，还没有待生效配置草案。\n'
+        printf '建议先修改 1-5 项，再生成配置。\n\n'
+        answer=$(ask_yes_no "仍然使用脚本默认草案生成配置" "no")
+        if [[ "$answer" == "yes" ]]; then
+          DRAFT_DIRTY="yes"
+          break
+        fi
+        ;;
       7) show_live_status ;;
       8) clean_legacy_outputs ;;
       9|q|Q) exit 0 ;;
@@ -758,30 +779,6 @@ if [[ "$CLEAN_OUTPUTS" == "yes" ]]; then
 fi
 
 STATE_DIR="$(default_state_dir)"
-if [[ -z "$OUT_DIR" ]]; then
-  OUT_DIR="$STATE_DIR/runs/$TS"
-  OUT_DIR_AUTO="yes"
-fi
-mkdir -p "$OUT_DIR"
-SYSCTL_OUT="$OUT_DIR/99-network-optimize.conf"
-LIMITS_OUT="$OUT_DIR/99-network-optimize-limits.conf"
-SYSTEMD_OUT="$OUT_DIR/99-network-optimize-system.conf"
-MODPROBE_OUT="$OUT_DIR/nf_conntrack.conf"
-ROUTE_OUT="$OUT_DIR/network-optimize-route.sh"
-NIC_OUT="$OUT_DIR/network-optimize-nic.sh"
-REPORT_OUT="$OUT_DIR/report.txt"
-
-mkdir -p "$STATE_DIR" 2>/dev/null || true
-ln -sfn "$OUT_DIR" "$STATE_DIR/latest" 2>/dev/null || true
-
-printf 'Network BBR Optimizer bbr.sh %s\n' "$VERSION"
-printf '输出目录: %s\n' "$OUT_DIR"
-if [[ "$OUT_DIR_AUTO" == "yes" ]]; then
-  printf '说明: 输出文件默认放在隐藏状态目录，不再堆在当前目录；latest 链接: %s/latest\n' "$STATE_DIR"
-else
-  printf '说明: 使用你指定的输出目录。\n'
-fi
-printf '\n'
 
 MEM_TOTAL_KB=$(mem_kb MemTotal)
 MEM_AVAIL_KB=$(mem_kb MemAvailable)
@@ -823,6 +820,31 @@ if [[ "$UI_MODE" == "menu" && ( -t 0 || -r "$TTY_DEVICE" ) ]]; then
 else
   linear_wizard
 fi
+
+if [[ -z "$OUT_DIR" ]]; then
+  OUT_DIR="$STATE_DIR/runs/$TS"
+  OUT_DIR_AUTO="yes"
+fi
+mkdir -p "$OUT_DIR"
+SYSCTL_OUT="$OUT_DIR/99-network-optimize.conf"
+LIMITS_OUT="$OUT_DIR/99-network-optimize-limits.conf"
+SYSTEMD_OUT="$OUT_DIR/99-network-optimize-system.conf"
+MODPROBE_OUT="$OUT_DIR/nf_conntrack.conf"
+ROUTE_OUT="$OUT_DIR/network-optimize-route.sh"
+NIC_OUT="$OUT_DIR/network-optimize-nic.sh"
+REPORT_OUT="$OUT_DIR/report.txt"
+
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+ln -sfn "$OUT_DIR" "$STATE_DIR/latest" 2>/dev/null || true
+
+printf 'Network BBR Optimizer bbr.sh %s\n' "$VERSION"
+printf '输出目录: %s\n' "$OUT_DIR"
+if [[ "$OUT_DIR_AUTO" == "yes" ]]; then
+  printf '说明: 输出文件默认放在隐藏状态目录，不再堆在当前目录；latest 链接: %s/latest\n' "$STATE_DIR"
+else
+  printf '说明: 使用你指定的输出目录。\n'
+fi
+printf '\n'
 
 LOSS_BP=$(loss_to_bp "$LOSS_PCT")
 
