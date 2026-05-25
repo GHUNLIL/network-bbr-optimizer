@@ -4,7 +4,7 @@
 
 默认目标是“极致满速 + 可控低抖动”：让测速、新连接和长 RTT 链路尽快跑满，同时限制队列深度，避免无意义堆积。脚本会生成并可应用 BBR、sysctl、RPS、conntrack、initcwnd、nofile、TCP Fast Open 等配置；应用层 mux/smux/yamux/multiplex 默认不会开启。
 
-默认业务按 `TCP+UDP 双优化` 处理，不只偏 TCP；UDP 会话、UDP socket 缓冲、netdev 队列和 conntrack UDP 容量都会一起计算。
+默认业务按 `TCP+UDP 双优化` 处理，不只偏 TCP；UDP 会话、UDP socket 缓冲、netdev 队列、conntrack UDP 容量、socket 默认缓冲、短连接回收和常见 TCP 基础能力都会一起计算。
 
 ## 一键运行
 
@@ -91,7 +91,7 @@ bash bbr.sh --out-dir /root/bbr-output
 ## 角色说明
 
 - 转发节点：包括前置入口、IX 专线、线路中继、国际互联和普通 nftables 转发。
-- 落地节点：默认指 3x-ui、Xray 等应用层出口机器。
+- 落地节点：默认指 3x-ui、Xray、GOST 等应用层出口机器。
 - 纯转发节点不会默认开启 TCP Fast Open，因为 nftables 内核转发不终止 TCP 连接，单边开启 TFO 对被转发连接没有实际帮助。
 - 落地节点默认不启用内核转发；只有机器同时承担 NAT、路由或 nftables 转发时才需要开启。
 - 脚本会在应用实时配置前生成回滚文件。

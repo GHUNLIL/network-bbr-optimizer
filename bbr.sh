@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.25.6"
+VERSION="2026.05.25.7"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -91,7 +91,7 @@ choice_label() {
     yes) printf '是 - 开启/确认' ;;
     no) printf '否 - 关闭/不启用' ;;
     forwarding) printf '转发节点 - nftables/路由内核转发机器' ;;
-    landing) printf '落地节点 - 3x-ui/Xray 等应用层出口机器' ;;
+    landing) printf '落地节点 - 3x-ui/Xray/GOST 等应用层出口机器' ;;
     front) printf '前置入口 - 家里路由器或用户先进入的第一跳转发' ;;
     ix) printf 'IX 专线 - 专线/IX 汇聚跳，只做极致内核转发' ;;
     relay) printf '线路中继 - 跨境或长 RTT 线路转发' ;;
@@ -342,6 +342,7 @@ clean_legacy_outputs() {
 }
 
 edit_role_scene() {
+  local tcp_default
   banner
   printf '%s角色与场景%s\n' "$BOLD" "$RESET"
   ROLE=$(ask_choice "机器角色" "$ROLE" forwarding landing)
@@ -354,7 +355,9 @@ edit_role_scene() {
     SCENE="landing"
     LANDING_ROUTES=$(ask_yes_no "落地机是否同时做 NAT/路由" "$LANDING_ROUTES")
     [[ "$LANDING_ROUTES" == "yes" ]] && STATEFUL="yes" || STATEFUL="no"
-    LOCAL_TCP_TERMINATION=$(ask_yes_no "落地机是否本机终止 TCP，例如 Xray/Web/代理监听服务" "$LOCAL_TCP_TERMINATION")
+    tcp_default="$LOCAL_TCP_TERMINATION"
+    [[ "$tcp_default" == "no" || "$tcp_default" == "auto" ]] && tcp_default="yes"
+    LOCAL_TCP_TERMINATION=$(ask_yes_no "落地机是否本机终止 TCP，例如 Xray/GOST/Web/代理监听服务" "$tcp_default")
   fi
   TARGET=$(ask_choice "优化目标" "$TARGET" speed throughput)
   BUSINESS=$(ask_choice "业务类型" "$BUSINESS" mixed tcp udp_game web)
@@ -479,6 +482,7 @@ interactive_menu() {
 }
 
 linear_wizard() {
+  local tcp_default
   ROLE=$(ask_choice "机器角色" "$ROLE" forwarding landing)
   if [[ "$ROLE" == "forwarding" ]]; then
     SCENE=$(ask_choice "转发场景" "$SCENE" front ix relay international plain)
@@ -509,7 +513,9 @@ linear_wizard() {
   IPV6_RA=$(ask_yes_no "IPv6 默认路由是否依赖 RA" "$IPV6_RA")
   HANDSHAKE=$(ask_yes_no "是否启用 TFO 等建连优化" "$HANDSHAKE")
   if [[ "$ROLE" == "landing" ]]; then
-    LOCAL_TCP_TERMINATION=$(ask_yes_no "落地机是否本机终止 TCP，例如 Xray/Web/代理监听服务" "$LOCAL_TCP_TERMINATION")
+    tcp_default="$LOCAL_TCP_TERMINATION"
+    [[ "$tcp_default" == "no" || "$tcp_default" == "auto" ]] && tcp_default="yes"
+    LOCAL_TCP_TERMINATION=$(ask_yes_no "落地机是否本机终止 TCP，例如 Xray/GOST/Web/代理监听服务" "$tcp_default")
   else
     LOCAL_TCP_TERMINATION=$(ask_yes_no "这台转发机是否也终止 TCP，例如还有代理/Web 监听服务" "$LOCAL_TCP_TERMINATION")
   fi
@@ -1053,6 +1059,10 @@ if [[ "$TARGET" == "throughput" ]]; then
   LOWAT_FACTOR=384
   LOWAT_LO=$((128 * 1024))
   LOWAT_HI=$((2 * MIB))
+elif [[ "$BUSINESS" == "mixed" ]]; then
+  LOWAT_FACTOR=320
+  LOWAT_LO=$((128 * 1024))
+  LOWAT_HI=$((1536 * 1024))
 else
   LOWAT_FACTOR=256
   LOWAT_LO=$((64 * 1024))
@@ -1091,6 +1101,12 @@ UDP_PRESSURE=$((UDP_MAX_PAGES * 3 / 4))
 
 OMEM_CAP=$(clamp $((TCP_MAX / 8)) "$MIB" $((16 * MIB)))
 OPTMEM=$(clamp $((MBW * 256 + UDP_SESSIONS / 4)) $((256 * 1024)) "$OMEM_CAP")
+SOCK_DEFAULT=$(clamp $((MBW * 1024 + UDP_SESSIONS / 8)) $((256 * 1024)) $((4 * MIB)))
+if [[ "$BUSINESS" == "mixed" ]]; then
+  SOCK_DEFAULT=$(clamp $((SOCK_DEFAULT * 3 / 2)) $((512 * 1024)) $((8 * MIB)))
+elif [[ "$TARGET" == "throughput" ]]; then
+  SOCK_DEFAULT=$(clamp "$SOCK_DEFAULT" "$MIB" $((8 * MIB)))
+fi
 
 if [[ "$BUSY_MODE" == "force" ]] || { [[ "$BUSY_MODE" == "auto" ]] && (( MBW >= 20 )) && { (( MAXRTT <= 20 )) || [[ "$BUSINESS" == "udp_game" && "$MAXRTT" -le 10 ]]; }; }; then
   BUSY_POLL=$(clamp $((20 + MBW / (CPU_COUNT + 1))) 20 400)
@@ -1149,6 +1165,10 @@ SYN_BACKLOG=$(pow2ceil "$(clamp $((CPS * 8 + TCP_CONNS / 8)) 8192 1048576)")
 FLOW_LIMIT=$(pow2ceil "$(clamp $((TCP_CONNS / 16 + UDP_SESSIONS / 8 + CPS * 2)) 4096 1048576)")
 NOFILE=$(pow2ceil "$(clamp $(((TCP_CONNS + UDP_SESSIONS + CPS * 10) * 2 + 4096)) 65536 8388608)")
 FS_FILE_MAX=$(pow2ceil "$(clamp $((NOFILE * 2)) 1048576 16777216)")
+TW_BUCKETS=$(pow2ceil "$(clamp $((TCP_CONNS / 2 + CPS * 60)) 262144 4194304)")
+FIN_TIMEOUT=15
+[[ "$BUSINESS" == "web" ]] && FIN_TIMEOUT=10
+[[ "$BUSINESS" == "mixed" && "$CPS" -gt 8000 ]] && FIN_TIMEOUT=10
 
 NETDEV_RAW=$((MBW * 16 + CPS * 8 + UDP_SESSIONS / 8))
 NETDEV_RAW=$((NETDEV_RAW * 15 / 10))
@@ -1225,8 +1245,14 @@ fi
 emit_sysctl fs.file-max "$FS_FILE_MAX"
 emit_sysctl net.core.rmem_max "$TCP_MAX"
 emit_sysctl net.core.wmem_max "$TCP_MAX"
+emit_sysctl net.core.rmem_default "$SOCK_DEFAULT"
+emit_sysctl net.core.wmem_default "$SOCK_DEFAULT"
 emit_sysctl net.ipv4.tcp_rmem "$TCP_RMEM_MIN $TCP_RMEM_DEFAULT $TCP_MAX"
 emit_sysctl net.ipv4.tcp_wmem "$TCP_WMEM_MIN $TCP_WMEM_DEFAULT $TCP_MAX"
+emit_sysctl net.ipv4.tcp_window_scaling 1
+emit_sysctl net.ipv4.tcp_timestamps 1
+emit_sysctl net.ipv4.tcp_sack 1
+emit_sysctl net.ipv4.tcp_dsack 1
 emit_sysctl net.ipv4.tcp_moderate_rcvbuf 1
 emit_sysctl net.core.optmem_max "$OPTMEM"
 emit_sysctl net.ipv4.tcp_notsent_lowat "$LOWAT"
@@ -1243,6 +1269,11 @@ else
 fi
 emit_sysctl net.ipv4.tcp_mtu_probing 1
 emit_sysctl net.ipv4.tcp_rfc1337 1
+emit_sysctl net.ipv4.tcp_no_metrics_save 1
+emit_sysctl net.ipv4.tcp_tw_reuse 1
+emit_sysctl net.ipv4.tcp_max_tw_buckets "$TW_BUCKETS"
+emit_sysctl net.ipv4.tcp_fin_timeout "$FIN_TIMEOUT"
+emit_sysctl net.ipv4.tcp_syncookies 1
 emit_sysctl net.ipv4.tcp_keepalive_time "$KEEP_TIME"
 emit_sysctl net.ipv4.tcp_keepalive_intvl "$KEEP_INTVL"
 emit_sysctl net.ipv4.tcp_keepalive_probes "$KEEP_PROBES"
@@ -1407,9 +1438,12 @@ UDP会话=$UDP_SESSIONS
 BDP_bytes=$BDP
 BDP倍数=$BDP_MULT
 TCP缓冲上限=$TCP_MAX
+socket默认缓冲=$SOCK_DEFAULT
 tcp_limit_output_bytes=$TCP_LIMIT
 initcwnd=$INITCWND
 nofile=$NOFILE
+TIME_WAIT上限=$TW_BUCKETS
+fin_timeout=$FIN_TIMEOUT
 netdev_max_backlog=$NETDEV_BACKLOG
 txqueuelen=$TXQUEUELEN
 RPS启用=$RPS_ENABLE
