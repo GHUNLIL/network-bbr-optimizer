@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.24.8"
+VERSION="2026.05.25.1"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -29,6 +29,8 @@ BUSY_MODE="auto"
 APPLY_MODE="ask"
 UI_MODE="menu"
 OUT_DIR=""
+OUT_DIR_AUTO="no"
+CLEAN_OUTPUTS="no"
 
 log() { printf '[*] %s\n' "$*"; }
 warn() { printf '[!] %s\n' "$*" >&2; }
@@ -230,7 +232,8 @@ business_label() {
 }
 
 show_summary() {
-  printf '%s当前参数%s\n' "$BOLD" "$RESET"
+  printf '%s本次配置草案%s\n' "$BOLD" "$RESET"
+  printf '  说明            : 这里不是系统已生效值；网卡/队列/CPU 为自动探测，其余为默认值或你的选择。\n'
   printf '  角色/场景      : %s / %s\n' "$(role_label)" "$(scene_label)"
   printf '  目标/业务      : %s / %s\n' "$(target_label)" "$(business_label)"
   printf '  带宽 Mbps      : 上行 %s / 下行 %s\n' "$UP_MBPS" "$DOWN_MBPS"
@@ -247,6 +250,83 @@ show_summary() {
     printf '  服务 nofile    : %s\n' "$SERVICE_NAME"
   fi
   return 0
+}
+
+print_live_sysctl() {
+  local key="$1" value
+  if sysctl_exists "$key"; then
+    value="$(read_sysctl "$key" "读取失败")"
+    printf '  %-46s %s\n' "$key" "$value"
+  else
+    printf '  %-46s %s\n' "$key" "当前内核不存在"
+  fi
+}
+
+show_live_status() {
+  banner
+  printf '%s系统已生效参数%s\n' "$BOLD" "$RESET"
+  printf '  说明            : 以下为从当前系统实时读取的值，不是本次配置草案。\n'
+  printf '  默认网卡        : %s / RX %s / TX %s / CPU %s\n\n' "$DEFAULT_IFACE" "$RX_QUEUES" "$TX_QUEUES" "$CPU_COUNT"
+  print_live_sysctl net.ipv4.tcp_congestion_control
+  print_live_sysctl net.core.default_qdisc
+  print_live_sysctl net.ipv4.tcp_fastopen
+  print_live_sysctl net.ipv4.tcp_rmem
+  print_live_sysctl net.ipv4.tcp_wmem
+  print_live_sysctl net.core.rmem_max
+  print_live_sysctl net.core.wmem_max
+  print_live_sysctl net.ipv4.tcp_limit_output_bytes
+  print_live_sysctl net.core.netdev_max_backlog
+  print_live_sysctl net.core.busy_poll
+  print_live_sysctl net.ipv4.ip_forward
+  print_live_sysctl net.ipv6.conf.all.forwarding
+  print_live_sysctl net.ipv4.conf.all.rp_filter
+  print_live_sysctl net.netfilter.nf_conntrack_max
+  printf '\n'
+  ip -br link show "$DEFAULT_IFACE" 2>/dev/null || true
+  ip route show default 2>/dev/null || true
+  ip -6 route show default 2>/dev/null || true
+  printf '\n'
+  pause_ui
+}
+
+default_state_dir() {
+  if [[ -n "${XDG_STATE_HOME:-}" ]]; then
+    printf '%s/network-bbr-optimizer' "$XDG_STATE_HOME"
+  elif [[ -n "${HOME:-}" ]]; then
+    printf '%s/.local/state/network-bbr-optimizer' "$HOME"
+  elif [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    printf '/root/.local/state/network-bbr-optimizer'
+  else
+    printf '/tmp/network-bbr-optimizer'
+  fi
+}
+
+clean_legacy_outputs() {
+  local path answer count=0
+  local -a outputs=()
+  for path in "$PWD"/bbr-output-*; do
+    [[ -d "$path" ]] || continue
+    outputs+=("$path")
+  done
+  if (( ${#outputs[@]} == 0 )); then
+    printf '当前目录没有旧版 bbr-output-* 输出目录。\n'
+    [[ "$CLEAN_OUTPUTS" == "yes" ]] || pause_ui
+    return 0
+  fi
+
+  printf '将删除当前目录下这些旧版输出目录：\n'
+  printf '  %s\n' "${outputs[@]}"
+  if has_tty || [[ -t 0 ]]; then
+    answer=$(ask_yes_no "确认删除这些旧输出目录" "no")
+    [[ "$answer" == "yes" ]] || { printf '已取消清理。\n'; [[ "$CLEAN_OUTPUTS" == "yes" ]] || pause_ui; return 0; }
+  fi
+  for path in "${outputs[@]}"; do
+    [[ -n "$path" && "$(basename "$path")" == bbr-output-* ]] || continue
+    rm -rf -- "$path"
+    count=$((count + 1))
+  done
+  printf '已清理 %s 个旧输出目录。新的输出默认放在隐藏状态目录，不会继续刷屏当前目录。\n' "$count"
+  [[ "$CLEAN_OUTPUTS" == "yes" ]] || pause_ui
 }
 
 edit_role_scene() {
@@ -314,7 +394,7 @@ edit_capacity() {
 }
 
 interactive_menu() {
-  local choice key cursor=5 count=7 i
+  local choice key cursor=5 count=9 i
   local options=(
     "角色/场景/业务"
     "链路带宽/RTT/丢包抖动"
@@ -322,6 +402,8 @@ interactive_menu() {
     "TFO/握手优化/应用层说明"
     "并发容量/高级覆盖"
     "生成配置"
+    "查看系统已生效参数"
+    "清理旧输出目录"
     "退出"
   )
   tput civis 2>/dev/null || true
@@ -329,7 +411,7 @@ interactive_menu() {
     banner
     show_summary
     hr
-    printf '%s↑/↓ 或 j/k 选择，Enter 确认；也可按 1-7，q 退出%s\n\n' "$DIM" "$RESET"
+    printf '%s↑/↓ 或 j/k 选择，Enter 确认；也可按 1-9，q 退出%s\n\n' "$DIM" "$RESET"
     for ((i=0; i<count; i++)); do
       if (( i == cursor )); then
         printf '  %s> %d) %s%s\n' "$GREEN" $((i + 1)) "${options[$i]}" "$RESET"
@@ -344,7 +426,7 @@ interactive_menu() {
         $'\e[A'|$'\eOA'|k|K) cursor=$(((cursor + count - 1) % count)); continue ;;
         $'\e[B'|$'\eOB'|j|J) cursor=$(((cursor + 1) % count)); continue ;;
         ""|$'\r'|$'\n') choice=$((cursor + 1)) ;;
-        [1-7]) choice="$key"; cursor=$((choice - 1)) ;;
+        [1-9]) choice="$key"; cursor=$((choice - 1)) ;;
         q|Q) exit 0 ;;
         *) continue ;;
       esac
@@ -360,7 +442,9 @@ interactive_menu() {
       4) edit_handshake ;;
       5) edit_capacity ;;
       6) break ;;
-      7|q|Q) exit 0 ;;
+      7) show_live_status ;;
+      8) clean_legacy_outputs ;;
+      9|q|Q) exit 0 ;;
       *) warn "无效选择"; pause_ui ;;
     esac
   done
@@ -423,7 +507,13 @@ Network BBR Optimizer bbr.sh
   bash bbr.sh --quick     # 线性问答模式
   bash bbr.sh --dry-run   # 只生成配置文件，不应用
   bash bbr.sh --apply     # 生成后默认询问应用
+  bash bbr.sh --out-dir DIR       # 指定输出目录
+  bash bbr.sh --clean-outputs     # 清理当前目录旧版 bbr-output-* 输出目录
   bash bbr.sh --help
+
+默认输出目录:
+  $HOME/.local/state/network-bbr-optimizer/runs/<时间戳>
+  不再在当前目录刷出一堆 bbr-output-*。
 
 默认不启用应用层 mux/multiplex。
 
@@ -442,6 +532,12 @@ while [[ $# -gt 0 ]]; do
     --quick) UI_MODE="wizard" ;;
     --dry-run) APPLY_MODE="no" ;;
     --apply) APPLY_MODE="yes" ;;
+    --out-dir)
+      shift
+      [[ $# -gt 0 ]] || die "--out-dir requires a directory"
+      OUT_DIR="$1"
+      ;;
+    --clean-outputs) CLEAN_OUTPUTS="yes" ;;
     --help|-h) usage; exit 0 ;;
     *) die "Unknown option: $1" ;;
   esac
@@ -656,7 +752,16 @@ EOF
 need_linux
 
 TS="$(date +%Y%m%d-%H%M%S)"
-OUT_DIR="${OUT_DIR:-$PWD/bbr-output-$TS}"
+if [[ "$CLEAN_OUTPUTS" == "yes" ]]; then
+  clean_legacy_outputs
+  exit 0
+fi
+
+STATE_DIR="$(default_state_dir)"
+if [[ -z "$OUT_DIR" ]]; then
+  OUT_DIR="$STATE_DIR/runs/$TS"
+  OUT_DIR_AUTO="yes"
+fi
 mkdir -p "$OUT_DIR"
 SYSCTL_OUT="$OUT_DIR/99-network-optimize.conf"
 LIMITS_OUT="$OUT_DIR/99-network-optimize-limits.conf"
@@ -666,8 +771,17 @@ ROUTE_OUT="$OUT_DIR/network-optimize-route.sh"
 NIC_OUT="$OUT_DIR/network-optimize-nic.sh"
 REPORT_OUT="$OUT_DIR/report.txt"
 
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+ln -sfn "$OUT_DIR" "$STATE_DIR/latest" 2>/dev/null || true
+
 printf 'Network BBR Optimizer bbr.sh %s\n' "$VERSION"
-printf 'Output directory: %s\n\n' "$OUT_DIR"
+printf '输出目录: %s\n' "$OUT_DIR"
+if [[ "$OUT_DIR_AUTO" == "yes" ]]; then
+  printf '说明: 输出文件默认放在隐藏状态目录，不再堆在当前目录；latest 链接: %s/latest\n' "$STATE_DIR"
+else
+  printf '说明: 使用你指定的输出目录。\n'
+fi
+printf '\n'
 
 MEM_TOTAL_KB=$(mem_kb MemTotal)
 MEM_AVAIL_KB=$(mem_kb MemAvailable)
