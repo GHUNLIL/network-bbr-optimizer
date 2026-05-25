@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.25.2"
+VERSION="2026.05.25.3"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
 # 术语备注：
 # BBR/BBR3：Linux TCP 拥塞控制算法名，保留英文。
-# TFO/TCP Fast Open：TCP 快速打开，减少本机主动连接或本机 listener 的握手等待。
+# TFO/TCP Fast Open：TCP 快速打开，减少本机主动连接或本机监听服务的握手等待。
 # RPS/RSS：网卡/内核收包分流机制，保留英文缩写。
 # nftables/conntrack/sysctl/systemd：Linux 内核转发、防火墙状态跟踪、内核参数和服务管理组件名。
 # fq/fq_codel/qdisc：Linux 队列调度器名，保留英文。
@@ -184,7 +184,7 @@ clear_ui() {
 
 banner() {
   clear_ui
-  printf '%sNetwork BBR Optimizer%s  %s%s%s\n' "$BOLD" "$RESET" "$CYAN" "$VERSION" "$RESET"
+  printf '%s中文 BBR 网络优化器%s  %s%s%s\n' "$BOLD" "$RESET" "$CYAN" "$VERSION" "$RESET"
   printf '目标: 极致满速 + 可控低抖动 | 默认不启用应用层 mux\n'
   printf '术语: BBR/TFO/RPS/nftables/conntrack/sysctl 保留英文，选项内带中文备注\n'
   hr
@@ -243,7 +243,7 @@ show_summary() {
   printf '  网卡/队列      : %s / RX %s / TX %s / CPU %s\n' "$DEFAULT_IFACE" "$RX_QUEUES" "$TX_QUEUES" "$CPU_COUNT"
   printf '  转发状态       : 状态规则=%s, 落地路由=%s, 多出口/策略路由=%s, IPv6 RA=%s\n' \
     "$(yn_label "$STATEFUL")" "$(yn_label "$LANDING_ROUTES")" "$(yn_label "$MULTIPATH")" "$(yn_label "$IPV6_RA")"
-  printf '  握手优化       : TFO=%s, 本机终止 TCP=%s, 全局 listener TFO=%s, busy_poll=%s\n' \
+  printf '  握手优化       : TFO=%s, 本机终止 TCP=%s, 全局监听 TFO=%s, busy_poll=%s\n' \
     "$(yn_label "$HANDSHAKE")" "$(yn_label "$LOCAL_TCP_TERMINATION")" "$(yn_label "$TFO_GLOBAL")" "$(choice_short_label "$BUSY_MODE")"
   printf '  手动覆盖       : TCP上限=%sMB, BDP倍数=%s, TCP并发=%s, UDP会话=%s, CPS=%s\n' \
     "$MANUAL_TCP_CAP_MB" "$MANUAL_BDP_MULT" "$TCP_CONNS_OVERRIDE" "$UDP_SESSIONS_OVERRIDE" "$CPS_OVERRIDE"
@@ -342,12 +342,12 @@ edit_role_scene() {
     SCENE=$(ask_choice "转发场景" "${SCENE:-plain}" front ix relay international plain)
     STATEFUL=$(ask_yes_no "是否 NAT/TProxy/状态 nftables 规则" "$STATEFUL")
     LANDING_ROUTES="no"
-    LOCAL_TCP_TERMINATION=$(ask_yes_no "这台转发机是否也终止 TCP，例如还有代理/Web listener" "$LOCAL_TCP_TERMINATION")
+    LOCAL_TCP_TERMINATION=$(ask_yes_no "这台转发机是否也终止 TCP，例如还有代理/Web 监听服务" "$LOCAL_TCP_TERMINATION")
   else
     SCENE="landing"
     LANDING_ROUTES=$(ask_yes_no "落地机是否同时做 NAT/路由" "$LANDING_ROUTES")
     [[ "$LANDING_ROUTES" == "yes" ]] && STATEFUL="yes" || STATEFUL="no"
-    LOCAL_TCP_TERMINATION=$(ask_yes_no "落地机是否本机终止 TCP，例如 Xray/Web/代理 listener" "$LOCAL_TCP_TERMINATION")
+    LOCAL_TCP_TERMINATION=$(ask_yes_no "落地机是否本机终止 TCP，例如 Xray/Web/代理监听服务" "$LOCAL_TCP_TERMINATION")
   fi
   TARGET=$(ask_choice "优化目标" "$TARGET" speed throughput)
   BUSINESS=$(ask_choice "业务类型" "$BUSINESS" mixed tcp udp_game web)
@@ -370,7 +370,7 @@ edit_runtime() {
   banner
   printf '%s网卡与运行时%s\n' "$BOLD" "$RESET"
   CPU_COUNT=$(to_int "$(ask "CPU 核数" "$CPU_COUNT")")
-  DEFAULT_IFACE=$(ask "主网卡 interface" "$DEFAULT_IFACE")
+  DEFAULT_IFACE=$(ask "主网卡名称" "$DEFAULT_IFACE")
   RX_QUEUES=$(to_int "$(ask "RX 队列数" "$RX_QUEUES")")
   TX_QUEUES=$(to_int "$(ask "TX 队列数" "$TX_QUEUES")")
   BUSY_MODE=$(ask_choice "busy_poll 模式" "$BUSY_MODE" auto force off)
@@ -381,7 +381,7 @@ edit_handshake() {
   printf '%s握手与应用层选项%s\n' "$BOLD" "$RESET"
   HANDSHAKE=$(ask_yes_no "是否启用 TFO 等建连优化" "$HANDSHAKE")
   LOCAL_TCP_TERMINATION=$(ask_yes_no "本机是否终止 TCP" "$LOCAL_TCP_TERMINATION")
-  TFO_GLOBAL=$(ask_yes_no "是否启用全局 listener TFO 1024 bit" "$TFO_GLOBAL")
+  TFO_GLOBAL=$(ask_yes_no "是否启用全局监听 TFO 1024 位" "$TFO_GLOBAL")
   printf '\n应用层 mux/smux/yamux/multiplex 默认不启用，本脚本不会写 mux 配置。\n'
   pause_ui
 }
@@ -494,7 +494,7 @@ linear_wizard() {
   JITTER_MS=$(to_int "$(ask "抖动 ms" "$JITTER_MS")")
 
   CPU_COUNT=$(to_int "$(ask "CPU 核数" "$CPU_COUNT")")
-  DEFAULT_IFACE=$(ask "主网卡 interface，用于 txqueuelen/RPS" "$DEFAULT_IFACE")
+  DEFAULT_IFACE=$(ask "主网卡名称，用于 txqueuelen/RPS" "$DEFAULT_IFACE")
   RX_QUEUES=$(to_int "$(ask "RX 队列数" "$RX_QUEUES")")
   TX_QUEUES=$(to_int "$(ask "TX 队列数" "$TX_QUEUES")")
 
@@ -502,11 +502,11 @@ linear_wizard() {
   IPV6_RA=$(ask_yes_no "IPv6 默认路由是否依赖 RA" "$IPV6_RA")
   HANDSHAKE=$(ask_yes_no "是否启用 TFO 等建连优化" "$HANDSHAKE")
   if [[ "$ROLE" == "landing" ]]; then
-    LOCAL_TCP_TERMINATION=$(ask_yes_no "落地机是否本机终止 TCP，例如 Xray/Web/代理 listener" "$LOCAL_TCP_TERMINATION")
+    LOCAL_TCP_TERMINATION=$(ask_yes_no "落地机是否本机终止 TCP，例如 Xray/Web/代理监听服务" "$LOCAL_TCP_TERMINATION")
   else
-    LOCAL_TCP_TERMINATION=$(ask_yes_no "这台转发机是否也终止 TCP，例如还有代理/Web listener" "$LOCAL_TCP_TERMINATION")
+    LOCAL_TCP_TERMINATION=$(ask_yes_no "这台转发机是否也终止 TCP，例如还有代理/Web 监听服务" "$LOCAL_TCP_TERMINATION")
   fi
-  TFO_GLOBAL=$(ask_yes_no "是否启用全局 listener TFO 1024 bit，通常选否" "$TFO_GLOBAL")
+  TFO_GLOBAL=$(ask_yes_no "是否启用全局监听 TFO 1024 位，通常选否" "$TFO_GLOBAL")
   BUSY_MODE=$(ask_choice "busy_poll 模式" "$BUSY_MODE" auto force off)
   MANUAL_TCP_CAP_MB=$(to_int "$(ask "单连接 tcp_max 上限 MB，0=自动" "$MANUAL_TCP_CAP_MB")")
   MANUAL_BDP_MULT=$(to_int "$(ask "BDP 倍数覆盖，0=自动" "$MANUAL_BDP_MULT")")
@@ -519,7 +519,7 @@ linear_wizard() {
 
 usage() {
   cat <<'USAGE'
-Network BBR Optimizer bbr.sh
+中文 BBR 网络优化器 bbr.sh
 
 交互式 Linux 网络优化脚本，面向极致专用转发节点和落地节点。
 
@@ -540,7 +540,7 @@ Network BBR Optimizer bbr.sh
 
 术语说明:
   BBR/BBR3: Linux TCP 拥塞控制算法名。
-  TFO/TCP Fast Open: TCP 快速打开，只对本机主动连接或本机 TCP listener 有意义。
+  TFO/TCP Fast Open: TCP 快速打开，只对本机主动连接或本机 TCP 监听服务有意义。
   RPS/RSS: 收包分流机制，用于多核处理网卡 RX 队列。
   nftables/conntrack/sysctl/systemd: Linux 防火墙、状态跟踪、内核参数和服务管理组件。
   fq/fq_codel/qdisc: Linux 队列调度器名。
@@ -555,12 +555,12 @@ while [[ $# -gt 0 ]]; do
     --apply) APPLY_MODE="yes" ;;
     --out-dir)
       shift
-      [[ $# -gt 0 ]] || die "--out-dir requires a directory"
+      [[ $# -gt 0 ]] || die "--out-dir 需要指定输出目录"
       OUT_DIR="$1"
       ;;
     --clean-outputs) CLEAN_OUTPUTS="yes" ;;
     --help|-h) usage; exit 0 ;;
-    *) die "Unknown option: $1" ;;
+    *) die "未知参数: $1" ;;
   esac
   shift
 done
@@ -568,7 +568,7 @@ done
 is_linux() { [[ "$(uname -s 2>/dev/null || true)" == "Linux" ]]; }
 
 need_linux() {
-  is_linux || die "This script is intended to run on Linux."
+  is_linux || die "这个脚本只适合在 Linux 上运行。"
 }
 
 is_root() { [[ "${EUID:-$(id -u)}" -eq 0 ]]; }
@@ -612,7 +612,7 @@ ask_choice() {
         return
       fi
     done
-    printf '无效选择，请输入编号、英文内部值或中文选项名。\n' >&2
+    printf '无效选择，请输入编号、内部选项值或中文选项名。\n' >&2
   done
 }
 
@@ -716,7 +716,7 @@ emit_sysctl() {
   if sysctl_exists "$key"; then
     printf '%s = %s\n' "$key" "$value" >> "$SYSCTL_OUT"
   else
-    printf '# skipped missing: %s = %s\n' "$key" "$value" >> "$SYSCTL_OUT"
+    printf '# 已跳过，当前内核缺少该参数: %s = %s\n' "$key" "$value" >> "$SYSCTL_OUT"
   fi
 }
 
@@ -765,7 +765,7 @@ EOF
 systemctl daemon-reexec 2>/dev/null || true
 systemctl daemon-reload 2>/dev/null || true
 sysctl --system || true
-echo "Rollback files restored. Reboot may be needed for conntrack hashsize and route/NIC runtime state."
+echo "回滚文件已恢复。conntrack hashsize、路由 initcwnd 或网卡运行时状态可能需要重启网络或重启系统才会完全回退。"
 EOF
   chmod +x "$rollback"
 }
@@ -837,7 +837,7 @@ REPORT_OUT="$OUT_DIR/report.txt"
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 ln -sfn "$OUT_DIR" "$STATE_DIR/latest" 2>/dev/null || true
 
-printf 'Network BBR Optimizer bbr.sh %s\n' "$VERSION"
+printf '中文 BBR 网络优化器 bbr.sh %s\n' "$VERSION"
 printf '输出目录: %s\n' "$OUT_DIR"
 if [[ "$OUT_DIR_AUTO" == "yes" ]]; then
   printf '说明: 输出文件默认放在隐藏状态目录，不再堆在当前目录；latest 链接: %s/latest\n' "$STATE_DIR"
@@ -1152,15 +1152,15 @@ RP_FILTER=2
 
 : > "$SYSCTL_OUT"
 {
-  printf '# Generated by bbr.sh %s on %s\n' "$VERSION" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  printf '# role=%s scene=%s target=%s business=%s\n\n' "$ROLE" "$SCENE" "$TARGET" "$BUSINESS"
+  printf '# 由 bbr.sh %s 生成，时间: %s\n' "$VERSION" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  printf '# 角色=%s 场景=%s 目标=%s 业务=%s\n\n' "$(role_label)" "$(scene_label)" "$(target_label)" "$(business_label)"
 } >> "$SYSCTL_OUT"
 
 emit_sysctl net.core.default_qdisc fq
 if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
   emit_sysctl net.ipv4.tcp_congestion_control bbr
 else
-  printf '# skipped: bbr is not listed in net.ipv4.tcp_available_congestion_control\n' >> "$SYSCTL_OUT"
+  printf '# 已跳过: net.ipv4.tcp_available_congestion_control 中没有 bbr\n' >> "$SYSCTL_OUT"
 fi
 emit_sysctl fs.file-max "$FS_FILE_MAX"
 emit_sysctl net.core.rmem_max "$TCP_MAX"
@@ -1178,7 +1178,7 @@ if [[ -n "$TFO_VALUE" ]]; then
   emit_sysctl net.ipv4.tcp_fastopen "$TFO_VALUE"
   [[ -n "$TFO_BLACKHOLE" ]] && emit_sysctl net.ipv4.tcp_fastopen_blackhole_timeout_sec "$TFO_BLACKHOLE"
 else
-  printf '# skipped: tcp_fastopen not useful for pure forwarding without local TCP termination\n' >> "$SYSCTL_OUT"
+  printf '# 已跳过: 纯内核转发且本机不终止 TCP 时，tcp_fastopen 对被转发连接没有实际帮助\n' >> "$SYSCTL_OUT"
 fi
 emit_sysctl net.ipv4.tcp_mtu_probing 1
 emit_sysctl net.ipv4.tcp_rfc1337 1
@@ -1215,7 +1215,7 @@ if [[ "$ROLE" == "forwarding" || "$LANDING_ROUTES" == "yes" ]]; then
   emit_sysctl net.ipv6.conf.all.accept_source_route 0
   emit_sysctl net.ipv6.conf.default.accept_source_route 0
   if [[ "$IPV6_RA" == "yes" ]]; then
-    printf '# IPv6 RA is needed on %s: set per-interface accept_ra=2 outside all/default if applicable.\n' "$DEFAULT_IFACE" >> "$SYSCTL_OUT"
+    printf '# IPv6 默认路由依赖 %s 的 RA：如需保留默认路由，请在接口级单独设置 accept_ra=2，不要写到 all/default。\n' "$DEFAULT_IFACE" >> "$SYSCTL_OUT"
   fi
 fi
 
@@ -1306,67 +1306,67 @@ EOF
 fi
 
 cat > "$REPORT_OUT" <<EOF
-Network BBR Optimizer report
-============================
-role=$ROLE
-scene=$SCENE
-target=$TARGET
-business=$BUSINESS
-iface=$DEFAULT_IFACE
-up_mbps=$UP_MBPS
-down_mbps=$DOWN_MBPS
-up_rtt_ms=$UP_RTT
-down_rtt_ms=$DOWN_RTT
-loss_pct=$LOSS_PCT
-jitter_ms=$JITTER_MS
-queue_jitter_guard=$QUEUE_JITTER_GUARD
+中文 BBR 网络优化器报告
+======================
+角色=$(role_label)
+场景=$(scene_label)
+目标=$(target_label)
+业务=$(business_label)
+主网卡=$DEFAULT_IFACE
+上行_Mbps=$UP_MBPS
+下行_Mbps=$DOWN_MBPS
+上游_RTT_ms=$UP_RTT
+下游_RTT_ms=$DOWN_RTT
+丢包率_pct=$LOSS_PCT
+抖动_ms=$JITTER_MS
+队列抖动保护=$QUEUE_JITTER_GUARD
 
-tcp_conns=$TCP_CONNS
-udp_sessions=$UDP_SESSIONS
-cps=$CPS
-mem_pct=$MEM_PCT
-bdp_bytes=$BDP
-bdp_mult=$BDP_MULT
-tcp_max=$TCP_MAX
+TCP并发=$TCP_CONNS
+UDP会话=$UDP_SESSIONS
+每秒新建连接=$CPS
+内存预算_pct=$MEM_PCT
+BDP_bytes=$BDP
+BDP倍数=$BDP_MULT
+TCP缓冲上限=$TCP_MAX
 tcp_limit_output_bytes=$TCP_LIMIT
 initcwnd=$INITCWND
 nofile=$NOFILE
 netdev_max_backlog=$NETDEV_BACKLOG
 txqueuelen=$TXQUEUELEN
-rps_enable=$RPS_ENABLE
-rps_cpus=$RPS_CPUS
-rps_flow_cnt=$RPS_FLOW_CNT
-tfo_value=${TFO_VALUE:-skipped}
-tfo_blackhole=${TFO_BLACKHOLE:-skipped}
-conntrack_needed=$CT_NEEDED
+RPS启用=$RPS_ENABLE
+RPS_CPU掩码=$RPS_CPUS
+RPS单队列流表=$RPS_FLOW_CNT
+TFO值=${TFO_VALUE:-已跳过}
+TFO黑洞检测=${TFO_BLACKHOLE:-已跳过}
+需要conntrack=$CT_NEEDED
 nf_conntrack_max=$NF_CONNTRACK_MAX
 nf_conntrack_buckets=$NF_CONNTRACK_BUCKETS
 
-Application mux/multiplex: not enabled by this script.
+应用层 mux/multiplex：本脚本不会开启。
 EOF
 
-printf '\nGenerated files:\n'
+printf '\n已生成文件:\n'
 printf '  %s\n' "$SYSCTL_OUT" "$LIMITS_OUT" "$SYSTEMD_OUT" "$ROUTE_OUT" "$NIC_OUT" "$REPORT_OUT"
 [[ -f "$MODPROBE_OUT" ]] && printf '  %s\n' "$MODPROBE_OUT"
 [[ -n "${SERVICE_DROPIN:-}" ]] && printf '  %s\n' "$SERVICE_DROPIN"
 
 if [[ "$APPLY_MODE" == "no" ]]; then
-  log "Dry run complete. Review files in $OUT_DIR."
+  log "只生成配置完成。请检查输出目录: $OUT_DIR"
   exit 0
 fi
 
 if ! is_root; then
-  warn "Not running as root. Generated files only; rerun with sudo to apply."
+  warn "当前不是 root，只生成配置文件；如需应用请使用 sudo 重新运行。"
   exit 0
 fi
 
 if [[ "$APPLY_MODE" == "ask" ]]; then
-  DO_APPLY=$(ask_yes_no "Apply generated configuration now?" "no")
+  DO_APPLY=$(ask_yes_no "现在应用刚生成的配置吗" "no")
 else
-  DO_APPLY=$(ask_yes_no "Apply generated configuration now?" "yes")
+  DO_APPLY=$(ask_yes_no "现在应用刚生成的配置吗" "yes")
 fi
 if [[ "$DO_APPLY" != "yes" ]]; then
-  log "Not applied. Review files in $OUT_DIR."
+  log "未应用配置。请检查输出目录: $OUT_DIR"
   exit 0
 fi
 
@@ -1385,7 +1385,7 @@ install_file "$NIC_OUT" /usr/local/sbin/network-optimize-nic.sh 0755 "$BACKUP_DI
 
 cat > "$OUT_DIR/network-optimize-route.service" <<'EOF'
 [Unit]
-Description=Apply network optimize route initcwnd
+Description=应用网络优化路由 initcwnd
 After=network-online.target
 Wants=network-online.target
 
@@ -1398,7 +1398,7 @@ WantedBy=multi-user.target
 EOF
 cat > "$OUT_DIR/network-optimize-nic.service" <<'EOF'
 [Unit]
-Description=Apply network optimize NIC txqueuelen and RPS
+Description=应用网络优化网卡 txqueuelen 和 RPS
 After=network-online.target
 Wants=network-online.target
 
@@ -1422,6 +1422,6 @@ systemctl daemon-reload 2>/dev/null || true
 systemctl enable --now network-optimize-route.service 2>/dev/null || true
 systemctl enable --now network-optimize-nic.service 2>/dev/null || true
 
-printf '\nApplied. Rollback script: %s/rollback.sh\n' "$OUT_DIR"
-printf 'Backup directory: %s\n' "$BACKUP_DIR"
-printf 'A reboot is recommended if nf_conntrack hashsize was changed.\n'
+printf '\n已应用配置。回滚脚本: %s/rollback.sh\n' "$OUT_DIR"
+printf '备份目录: %s\n' "$BACKUP_DIR"
+printf '如果 nf_conntrack hashsize 发生变化，建议重启系统让它完整生效。\n'
