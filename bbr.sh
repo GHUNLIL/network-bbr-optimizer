@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.25.4"
+VERSION="2026.05.25.5"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -313,24 +313,31 @@ clean_legacy_outputs() {
     [[ -d "$path" ]] || continue
     outputs+=("$path")
   done
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    for path in /root/network-optimize-backup-*; do
+      [[ -d "$path" ]] || continue
+      outputs+=("$path")
+    done
+  fi
   if (( ${#outputs[@]} == 0 )); then
-    printf '当前目录没有旧版 bbr-output-* 输出目录。\n'
+    printf '没有发现旧版 bbr-output-* 或 /root/network-optimize-backup-* 目录。\n'
     [[ "$CLEAN_OUTPUTS" == "yes" ]] || pause_ui
     return 0
   fi
 
-  printf '将删除当前目录下这些旧版输出目录：\n'
+  printf '将删除这些旧版输出/备份目录：\n'
   printf '  %s\n' "${outputs[@]}"
   if has_tty || [[ -t 0 ]]; then
     answer=$(ask_yes_no "确认删除这些旧输出目录" "no")
     [[ "$answer" == "yes" ]] || { printf '已取消清理。\n'; [[ "$CLEAN_OUTPUTS" == "yes" ]] || pause_ui; return 0; }
   fi
   for path in "${outputs[@]}"; do
-    [[ -n "$path" && "$(basename "$path")" == bbr-output-* ]] || continue
+    [[ -n "$path" ]] || continue
+    [[ "$(basename "$path")" == bbr-output-* || "$(basename "$path")" == network-optimize-backup-* ]] || continue
     rm -rf -- "$path"
     count=$((count + 1))
   done
-  printf '已清理 %s 个旧输出目录。新的输出默认放在隐藏状态目录，不会继续刷屏当前目录。\n' "$count"
+  printf '已清理 %s 个旧输出/备份目录。新的输出和备份默认放在隐藏状态目录。\n' "$count"
   [[ "$CLEAN_OUTPUTS" == "yes" ]] || pause_ui
 }
 
@@ -529,12 +536,16 @@ usage() {
   bash bbr.sh --dry-run   # 只生成配置文件，不应用
   bash bbr.sh --apply     # 生成后默认询问应用
   bash bbr.sh --out-dir DIR       # 指定输出目录
-  bash bbr.sh --clean-outputs     # 清理当前目录旧版 bbr-output-* 输出目录
+  bash bbr.sh --clean-outputs     # 清理旧版 bbr-output-* 和 /root/network-optimize-backup-* 目录
   bash bbr.sh --help
 
 默认输出目录:
   $HOME/.local/state/network-bbr-optimizer/runs/<时间戳>
   不再在当前目录刷出一堆 bbr-output-*。
+
+默认备份目录:
+  $HOME/.local/state/network-bbr-optimizer/backups/<时间戳>
+  不再在 /root 下面刷出一堆 network-optimize-backup-*。
 
 默认不启用应用层 mux/multiplex。
 
@@ -718,6 +729,33 @@ emit_sysctl() {
   else
     printf '# 已跳过，当前内核缺少该参数: %s = %s\n' "$key" "$value" >> "$SYSCTL_OUT"
   fi
+}
+
+apply_generated_sysctl_live() {
+  local file="$1" line key value
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" == *"="* ]] || continue
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="$(printf '%s' "$key" | tr -d '[:space:]')"
+    value="$(printf '%s' "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [[ -n "$key" ]] || continue
+    sysctl -w "$key=$value" >/dev/null 2>&1 || warn "运行时应用失败: $key=$value"
+  done < "$file"
+}
+
+print_final_sysctl_status() {
+  printf '\n最终生效检查:\n'
+  print_live_sysctl net.ipv4.tcp_congestion_control
+  print_live_sysctl net.core.default_qdisc
+  print_live_sysctl net.ipv4.tcp_fastopen
+  print_live_sysctl net.ipv4.ip_forward
+  print_live_sysctl net.ipv6.conf.all.forwarding
+  print_live_sysctl net.ipv4.conf.all.rp_filter
+  print_live_sysctl net.netfilter.nf_conntrack_max
+  print_live_sysctl net.core.busy_poll
 }
 
 backup_file() {
@@ -1398,8 +1436,9 @@ if [[ "$DO_APPLY" != "yes" ]]; then
   exit 0
 fi
 
-BACKUP_DIR="/root/network-optimize-backup-$TS"
+BACKUP_DIR="$STATE_DIR/backups/$TS"
 mkdir -p "$BACKUP_DIR"
+ln -sfn "$BACKUP_DIR" "$STATE_DIR/latest-backup" 2>/dev/null || true
 write_rollback "$BACKUP_DIR"
 
 install_file "$SYSCTL_OUT" /etc/sysctl.d/99-network-optimize.conf 0644 "$BACKUP_DIR"
@@ -1443,6 +1482,7 @@ if [[ -n "${SERVICE_DROPIN:-}" ]]; then
 fi
 
 sysctl --system
+apply_generated_sysctl_live "$SYSCTL_OUT"
 if [[ "$CT_NEEDED" != "yes" ]] && sysctl_exists net.netfilter.nf_conntrack_max; then
   CT_CURRENT="$(read_sysctl net.netfilter.nf_conntrack_max 0)"
   CT_COUNT="$(read_sysctl net.netfilter.nf_conntrack_count 0)"
@@ -1459,6 +1499,7 @@ systemctl daemon-reexec 2>/dev/null || true
 systemctl daemon-reload 2>/dev/null || true
 systemctl enable --now network-optimize-route.service 2>/dev/null || true
 systemctl enable --now network-optimize-nic.service 2>/dev/null || true
+print_final_sysctl_status
 
 printf '\n已应用配置。回滚脚本: %s/rollback.sh\n' "$OUT_DIR"
 printf '备份目录: %s\n' "$BACKUP_DIR"

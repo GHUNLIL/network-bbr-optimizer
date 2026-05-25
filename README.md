@@ -42,7 +42,7 @@ bash bbr.sh --quick         # 逐项问答模式
 bash bbr.sh --dry-run       # 只生成配置，不应用
 bash bbr.sh --apply         # 生成配置，并询问是否应用
 bash bbr.sh --out-dir DIR   # 指定输出目录
-bash bbr.sh --clean-outputs # 清理当前目录旧版 bbr-output-* 输出目录
+bash bbr.sh --clean-outputs # 清理旧版 bbr-output-* 和 /root/network-optimize-backup-* 目录
 bash bbr.sh --help          # 查看帮助
 ```
 
@@ -66,6 +66,18 @@ $HOME/.local/state/network-bbr-optimizer/runs/<时间戳>
 
 ```text
 $HOME/.local/state/network-bbr-optimizer/latest
+```
+
+默认备份位置：
+
+```text
+$HOME/.local/state/network-bbr-optimizer/backups/<时间戳>
+```
+
+最近一次备份会链接到：
+
+```text
+$HOME/.local/state/network-bbr-optimizer/latest-backup
 ```
 
 如果你想指定输出目录，可以使用：
