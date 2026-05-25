@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.24.7"
+VERSION="2026.05.24.8"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
+
+# 术语备注：
+# BBR/BBR3：Linux TCP 拥塞控制算法名，保留英文。
+# TFO/TCP Fast Open：TCP 快速打开，减少本机主动连接或本机 listener 的握手等待。
+# RPS/RSS：网卡/内核收包分流机制，保留英文缩写。
+# nftables/conntrack/sysctl/systemd：Linux 内核转发、防火墙状态跟踪、内核参数和服务管理组件名。
+# fq/fq_codel/qdisc：Linux 队列调度器名，保留英文。
+# busy_poll/busy_read：Linux 低延迟轮询参数名，保留英文。
+# initcwnd/initrwnd/txqueuelen/nofile：路由初始窗口、网卡发送队列和文件描述符限制参数名。
 
 ROLE=""
 SCENE=""
@@ -74,6 +83,46 @@ read_key() {
   printf -v "$__var" '%s' "$pressed"
 }
 
+choice_label() {
+  case "$1" in
+    yes) printf '是 - 开启/确认' ;;
+    no) printf '否 - 关闭/不启用' ;;
+    forwarding) printf '转发节点 - nftables/路由内核转发机器' ;;
+    landing) printf '落地节点 - 3x-ui/Xray 等应用层出口机器' ;;
+    front) printf '前置入口 - 家里路由器或用户先进入的第一跳转发' ;;
+    ix) printf 'IX 专线 - 专线/IX 汇聚跳，只做极致内核转发' ;;
+    relay) printf '线路中继 - 跨境或长 RTT 线路转发' ;;
+    international) printf '国际互联 - 公网国际段/不可控跨境转发' ;;
+    plain) printf '普通 nftables 转发 - 通用内核转发画像' ;;
+    speed) printf '极致满速 - 新连接和测速尽快跑满，同时控制队列' ;;
+    throughput) printf '极致吞吐 - 更偏大流量长时间持续吞吐' ;;
+    mixed) printf '混合代理/中转 - TCP/UDP 混合业务' ;;
+    tcp) printf 'TCP 长连接 - 长连接、代理隧道或大流量 TCP' ;;
+    udp_game) printf 'UDP 游戏/实时 - 游戏、语音、实时 UDP' ;;
+    web) printf 'Web/HTTPS - 网站、API、短连接 HTTPS' ;;
+    auto) printf '自动 - 按带宽/RTT/业务自动判断' ;;
+    force) printf '强制开启 - 跳过自动判断直接启用' ;;
+    off) printf '关闭 - 不启用该项' ;;
+    bbr1) printf 'BBR1 - 按常见 BBR1 内核计算' ;;
+    bbr3) printf 'BBR3 - 仅在确认内核是 BBR3 时选择' ;;
+    unknown) printf '未知 - 不确定版本时使用，按 BBR1/未知保守计算' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+choice_short_label() {
+  case "$1" in
+    yes|no) yn_label "$1" ;;
+    auto) printf '自动' ;;
+    force) printf '强制开启' ;;
+    off) printf '关闭' ;;
+    bbr1) printf 'BBR1' ;;
+    bbr3) printf 'BBR3' ;;
+    unknown) printf '未知' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 select_option() {
   local prompt="$1" default="$2" key count cursor=0 i
   shift 2
@@ -93,9 +142,9 @@ select_option() {
     printf '%s↑/↓ 或 j/k 选择，Enter 确认，q 返回/退出%s\n\n' "$DIM" "$RESET" > "$TTY_DEVICE"
     for ((i=0; i<count; i++)); do
       if (( i == cursor )); then
-        printf '  %s> %s%s\n' "$GREEN" "${options[$i]}" "$RESET" > "$TTY_DEVICE"
+        printf '  %s> %s%s\n' "$GREEN" "$(choice_label "${options[$i]}")" "$RESET" > "$TTY_DEVICE"
       else
-        printf '    %s\n' "${options[$i]}" > "$TTY_DEVICE"
+        printf '    %s\n' "$(choice_label "${options[$i]}")" > "$TTY_DEVICE"
       fi
     done
 
@@ -134,6 +183,7 @@ banner() {
   clear_ui
   printf '%sNetwork BBR Optimizer%s  %s%s%s\n' "$BOLD" "$RESET" "$CYAN" "$VERSION" "$RESET"
   printf '目标: 极致满速 + 可控低抖动 | 默认不启用应用层 mux\n'
+  printf '术语: BBR/TFO/RPS/nftables/conntrack/sysctl 保留英文，选项内带中文备注\n'
   hr
 }
 
@@ -187,11 +237,11 @@ show_summary() {
   printf '  RTT ms         : 上游 %s / 下游 %s\n' "$UP_RTT" "$DOWN_RTT"
   printf '  丢包/抖动      : %s%% / %sms\n' "$LOSS_PCT" "$JITTER_MS"
   printf '  网卡/队列      : %s / RX %s / TX %s / CPU %s\n' "$DEFAULT_IFACE" "$RX_QUEUES" "$TX_QUEUES" "$CPU_COUNT"
-  printf '  转发状态       : stateful=%s, landing_routes=%s, multipath=%s, ipv6_ra=%s\n' \
+  printf '  转发状态       : 状态规则=%s, 落地路由=%s, 多出口/策略路由=%s, IPv6 RA=%s\n' \
     "$(yn_label "$STATEFUL")" "$(yn_label "$LANDING_ROUTES")" "$(yn_label "$MULTIPATH")" "$(yn_label "$IPV6_RA")"
-  printf '  握手优化       : TFO=%s, local_tcp=%s, global_tfo=%s, busy_poll=%s\n' \
-    "$(yn_label "$HANDSHAKE")" "$(yn_label "$LOCAL_TCP_TERMINATION")" "$(yn_label "$TFO_GLOBAL")" "$BUSY_MODE"
-  printf '  手动覆盖       : tcp_cap=%sMB, bdp_mult=%s, tcp=%s, udp=%s, cps=%s\n' \
+  printf '  握手优化       : TFO=%s, 本机终止 TCP=%s, 全局 listener TFO=%s, busy_poll=%s\n' \
+    "$(yn_label "$HANDSHAKE")" "$(yn_label "$LOCAL_TCP_TERMINATION")" "$(yn_label "$TFO_GLOBAL")" "$(choice_short_label "$BUSY_MODE")"
+  printf '  手动覆盖       : TCP上限=%sMB, BDP倍数=%s, TCP并发=%s, UDP会话=%s, CPS=%s\n' \
     "$MANUAL_TCP_CAP_MB" "$MANUAL_BDP_MULT" "$TCP_CONNS_OVERRIDE" "$UDP_SESSIONS_OVERRIDE" "$CPS_OVERRIDE"
   if [[ -n "$SERVICE_NAME" ]]; then
     printf '  服务 nofile    : %s\n' "$SERVICE_NAME"
@@ -202,9 +252,9 @@ show_summary() {
 edit_role_scene() {
   banner
   printf '%s角色与场景%s\n' "$BOLD" "$RESET"
-  ROLE=$(ask_choice "机器角色 forwarding=转发 landing=落地" "$ROLE" forwarding landing)
+  ROLE=$(ask_choice "机器角色" "$ROLE" forwarding landing)
   if [[ "$ROLE" == "forwarding" ]]; then
-    SCENE=$(ask_choice "转发场景 front/ix/relay/international/plain" "${SCENE:-plain}" front ix relay international plain)
+    SCENE=$(ask_choice "转发场景" "${SCENE:-plain}" front ix relay international plain)
     STATEFUL=$(ask_yes_no "是否 NAT/TProxy/状态 nftables 规则" "$STATEFUL")
     LANDING_ROUTES="no"
     LOCAL_TCP_TERMINATION=$(ask_yes_no "这台转发机是否也终止 TCP，例如还有代理/Web listener" "$LOCAL_TCP_TERMINATION")
@@ -214,8 +264,8 @@ edit_role_scene() {
     [[ "$LANDING_ROUTES" == "yes" ]] && STATEFUL="yes" || STATEFUL="no"
     LOCAL_TCP_TERMINATION=$(ask_yes_no "落地机是否本机终止 TCP，例如 Xray/Web/代理 listener" "$LOCAL_TCP_TERMINATION")
   fi
-  TARGET=$(ask_choice "优化目标 speed=极致满速 throughput=极致吞吐" "$TARGET" speed throughput)
-  BUSINESS=$(ask_choice "业务类型 mixed/tcp/udp_game/web" "$BUSINESS" mixed tcp udp_game web)
+  TARGET=$(ask_choice "优化目标" "$TARGET" speed throughput)
+  BUSINESS=$(ask_choice "业务类型" "$BUSINESS" mixed tcp udp_game web)
 }
 
 edit_link() {
@@ -238,7 +288,7 @@ edit_runtime() {
   DEFAULT_IFACE=$(ask "主网卡 interface" "$DEFAULT_IFACE")
   RX_QUEUES=$(to_int "$(ask "RX 队列数" "$RX_QUEUES")")
   TX_QUEUES=$(to_int "$(ask "TX 队列数" "$TX_QUEUES")")
-  BUSY_MODE=$(ask_choice "busy_poll 模式 auto/force/off" "$BUSY_MODE" auto force off)
+  BUSY_MODE=$(ask_choice "busy_poll 模式" "$BUSY_MODE" auto force off)
 }
 
 edit_handshake() {
@@ -259,7 +309,7 @@ edit_capacity() {
   CPS_OVERRIDE=$(to_int "$(ask "每秒新建连接覆盖，0=自动" "$CPS_OVERRIDE")")
   MANUAL_TCP_CAP_MB=$(to_int "$(ask "单连接 tcp_max 上限 MB，0=自动" "$MANUAL_TCP_CAP_MB")")
   MANUAL_BDP_MULT=$(to_int "$(ask "BDP 倍数覆盖，0=自动" "$MANUAL_BDP_MULT")")
-  BBR_KIND=$(ask_choice "BBR 版本假设 bbr1/bbr3/unknown" "$BBR_KIND" bbr1 bbr3 unknown)
+  BBR_KIND=$(ask_choice "BBR 版本假设" "$BBR_KIND" bbr1 bbr3 unknown)
   SERVICE_NAME=$(ask "可选 systemd 服务名，用于 LimitNOFILE drop-in，空=跳过" "$SERVICE_NAME")
 }
 
@@ -317,49 +367,49 @@ interactive_menu() {
 }
 
 linear_wizard() {
-  ROLE=$(ask_choice "Role: forwarding or landing" "$ROLE" forwarding landing)
+  ROLE=$(ask_choice "机器角色" "$ROLE" forwarding landing)
   if [[ "$ROLE" == "forwarding" ]]; then
-    SCENE=$(ask_choice "Forwarding scene: front, ix, relay, international, plain" "$SCENE" front ix relay international plain)
-    STATEFUL=$(ask_yes_no "Does this node use NAT/TProxy/stateful nftables rules?" "$STATEFUL")
+    SCENE=$(ask_choice "转发场景" "$SCENE" front ix relay international plain)
+    STATEFUL=$(ask_yes_no "是否 NAT/TProxy/状态 nftables 规则" "$STATEFUL")
     LANDING_ROUTES="no"
   else
     SCENE="landing"
-    LANDING_ROUTES=$(ask_yes_no "Does this landing node also do NAT/routing?" "$LANDING_ROUTES")
+    LANDING_ROUTES=$(ask_yes_no "落地机是否同时做 NAT/路由" "$LANDING_ROUTES")
     [[ "$LANDING_ROUTES" == "yes" ]] && STATEFUL="yes" || STATEFUL="no"
   fi
 
-  TARGET=$(ask_choice "Target: speed or throughput" "$TARGET" speed throughput)
-  BUSINESS=$(ask_choice "Business: mixed, tcp, udp_game, web" "$BUSINESS" mixed tcp udp_game web)
+  TARGET=$(ask_choice "优化目标" "$TARGET" speed throughput)
+  BUSINESS=$(ask_choice "业务类型" "$BUSINESS" mixed tcp udp_game web)
 
-  UP_MBPS=$(to_int "$(ask "Upstream/upload Mbps" "$UP_MBPS")")
-  DOWN_MBPS=$(to_int "$(ask "Downstream/download Mbps" "$DOWN_MBPS")")
-  UP_RTT=$(to_int "$(ask "Upstream RTT ms" "$UP_RTT")")
-  DOWN_RTT=$(to_int "$(ask "Downstream RTT ms" "$DOWN_RTT")")
-  LOSS_PCT=$(ask "Loss percent, e.g. 0 or 0.3" "$LOSS_PCT")
-  JITTER_MS=$(to_int "$(ask "Jitter ms" "$JITTER_MS")")
+  UP_MBPS=$(to_int "$(ask "上行/入口 Mbps" "$UP_MBPS")")
+  DOWN_MBPS=$(to_int "$(ask "下行/出口 Mbps" "$DOWN_MBPS")")
+  UP_RTT=$(to_int "$(ask "上游 RTT ms" "$UP_RTT")")
+  DOWN_RTT=$(to_int "$(ask "下游 RTT ms" "$DOWN_RTT")")
+  LOSS_PCT=$(ask "丢包率百分比，例如 0 或 0.3" "$LOSS_PCT")
+  JITTER_MS=$(to_int "$(ask "抖动 ms" "$JITTER_MS")")
 
-  CPU_COUNT=$(to_int "$(ask "CPU cores" "$CPU_COUNT")")
-  DEFAULT_IFACE=$(ask "Primary interface for txqueuelen/RPS" "$DEFAULT_IFACE")
-  RX_QUEUES=$(to_int "$(ask "RX queue count" "$RX_QUEUES")")
-  TX_QUEUES=$(to_int "$(ask "TX queue count" "$TX_QUEUES")")
+  CPU_COUNT=$(to_int "$(ask "CPU 核数" "$CPU_COUNT")")
+  DEFAULT_IFACE=$(ask "主网卡 interface，用于 txqueuelen/RPS" "$DEFAULT_IFACE")
+  RX_QUEUES=$(to_int "$(ask "RX 队列数" "$RX_QUEUES")")
+  TX_QUEUES=$(to_int "$(ask "TX 队列数" "$TX_QUEUES")")
 
-  MULTIPATH=$(ask_yes_no "Multi-path, policy routing, or asymmetric return?" "$MULTIPATH")
-  IPV6_RA=$(ask_yes_no "Does IPv6 default route depend on RA on this interface?" "$IPV6_RA")
-  HANDSHAKE=$(ask_yes_no "Enable handshake optimizations where applicable, e.g. TFO?" "$HANDSHAKE")
+  MULTIPATH=$(ask_yes_no "是否多出口/策略路由/非对称回程" "$MULTIPATH")
+  IPV6_RA=$(ask_yes_no "IPv6 默认路由是否依赖 RA" "$IPV6_RA")
+  HANDSHAKE=$(ask_yes_no "是否启用 TFO 等建连优化" "$HANDSHAKE")
   if [[ "$ROLE" == "landing" ]]; then
-    LOCAL_TCP_TERMINATION=$(ask_yes_no "Does this node terminate TCP locally, e.g. Xray/Web/proxy listener?" "$LOCAL_TCP_TERMINATION")
+    LOCAL_TCP_TERMINATION=$(ask_yes_no "落地机是否本机终止 TCP，例如 Xray/Web/代理 listener" "$LOCAL_TCP_TERMINATION")
   else
-    LOCAL_TCP_TERMINATION=$(ask_yes_no "Does this forwarding node also terminate TCP locally?" "$LOCAL_TCP_TERMINATION")
+    LOCAL_TCP_TERMINATION=$(ask_yes_no "这台转发机是否也终止 TCP，例如还有代理/Web listener" "$LOCAL_TCP_TERMINATION")
   fi
-  TFO_GLOBAL=$(ask_yes_no "Enable global listener TFO 1024 bit? Usually no" "$TFO_GLOBAL")
-  BUSY_MODE=$(ask_choice "busy_poll mode: auto, force, off" "$BUSY_MODE" auto force off)
-  MANUAL_TCP_CAP_MB=$(to_int "$(ask "Manual tcp_max cap MB, 0 = auto" "$MANUAL_TCP_CAP_MB")")
-  MANUAL_BDP_MULT=$(to_int "$(ask "Manual BDP multiplier, 0 = auto" "$MANUAL_BDP_MULT")")
-  BBR_KIND=$(ask_choice "BBR version assumption: bbr1, bbr3, unknown" "$BBR_KIND" bbr1 bbr3 unknown)
-  TCP_CONNS_OVERRIDE=$(to_int "$(ask "TCP concurrent connections, 0 = auto" "$TCP_CONNS_OVERRIDE")")
-  UDP_SESSIONS_OVERRIDE=$(to_int "$(ask "UDP sessions, 0 = auto" "$UDP_SESSIONS_OVERRIDE")")
-  CPS_OVERRIDE=$(to_int "$(ask "New connections per second, 0 = auto" "$CPS_OVERRIDE")")
-  SERVICE_NAME=$(ask "Optional service name for LimitNOFILE drop-in, empty = skip" "$SERVICE_NAME")
+  TFO_GLOBAL=$(ask_yes_no "是否启用全局 listener TFO 1024 bit，通常选否" "$TFO_GLOBAL")
+  BUSY_MODE=$(ask_choice "busy_poll 模式" "$BUSY_MODE" auto force off)
+  MANUAL_TCP_CAP_MB=$(to_int "$(ask "单连接 tcp_max 上限 MB，0=自动" "$MANUAL_TCP_CAP_MB")")
+  MANUAL_BDP_MULT=$(to_int "$(ask "BDP 倍数覆盖，0=自动" "$MANUAL_BDP_MULT")")
+  BBR_KIND=$(ask_choice "BBR 版本假设" "$BBR_KIND" bbr1 bbr3 unknown)
+  TCP_CONNS_OVERRIDE=$(to_int "$(ask "TCP 并发覆盖，0=自动" "$TCP_CONNS_OVERRIDE")")
+  UDP_SESSIONS_OVERRIDE=$(to_int "$(ask "UDP 会话覆盖，0=自动" "$UDP_SESSIONS_OVERRIDE")")
+  CPS_OVERRIDE=$(to_int "$(ask "每秒新建连接覆盖，0=自动" "$CPS_OVERRIDE")")
+  SERVICE_NAME=$(ask "可选 systemd 服务名，用于 LimitNOFILE drop-in，空=跳过" "$SERVICE_NAME")
 }
 
 usage() {
@@ -376,6 +426,14 @@ Network BBR Optimizer bbr.sh
   bash bbr.sh --help
 
 默认不启用应用层 mux/multiplex。
+
+术语说明:
+  BBR/BBR3: Linux TCP 拥塞控制算法名。
+  TFO/TCP Fast Open: TCP 快速打开，只对本机主动连接或本机 TCP listener 有意义。
+  RPS/RSS: 收包分流机制，用于多核处理网卡 RX 队列。
+  nftables/conntrack/sysctl/systemd: Linux 防火墙、状态跟踪、内核参数和服务管理组件。
+  fq/fq_codel/qdisc: Linux 队列调度器名。
+  busy_poll/busy_read: Linux 低延迟轮询参数名。
 USAGE
 }
 
@@ -405,39 +463,39 @@ ask() {
 }
 
 ask_yes_no() {
-  local prompt="$1" default="$2" value
-  if has_tty && [[ -t 1 ]]; then
-    select_option "$prompt" "$default" yes no
-    return
-  fi
-  while true; do
-    prompt_read value "$prompt [$default]: " || true
-    value="${value:-$default}"
-    case "$value" in
-      y|Y|yes|YES|Yes) printf 'yes'; return ;;
-      n|N|no|NO|No) printf 'no'; return ;;
-      *) printf 'Please answer yes or no.\n' >&2 ;;
-    esac
-  done
+  ask_choice "$1" "$2" yes no
 }
 
 ask_choice() {
-  local prompt="$1" default="$2" value valid
+  local prompt="$1" default="$2" value valid label label_name i
   shift 2
+  local options=("$@")
   if has_tty && [[ -t 1 ]]; then
-    select_option "$prompt" "$default" "$@"
+    select_option "$prompt" "$default" "${options[@]}"
     return
   fi
   while true; do
-    prompt_read value "$prompt [$default]: " || true
+    printf '%s\n' "$prompt" >&2
+    i=1
+    for valid in "${options[@]}"; do
+      printf '  %d) %s\n' "$i" "$(choice_label "$valid")" >&2
+      i=$((i + 1))
+    done
+    prompt_read value "请选择编号或输入选项 [$(choice_label "$default")]: " || true
     value="${value:-$default}"
-    for valid in "$@"; do
-      if [[ "$value" == "$valid" ]]; then
-        printf '%s' "$value"
+    if [[ "$value" =~ ^[0-9]+$ ]] && (( value >= 1 && value <= ${#options[@]} )); then
+      printf '%s' "${options[$((value - 1))]}"
+      return
+    fi
+    for valid in "${options[@]}"; do
+      label="$(choice_label "$valid")"
+      label_name="${label%% - *}"
+      if [[ "$value" == "$valid" || "$value" == "$label" || "$value" == "$label_name" ]]; then
+        printf '%s' "$valid"
         return
       fi
     done
-    printf 'Valid choices: %s\n' "$*" >&2
+    printf '无效选择，请输入编号、英文内部值或中文选项名。\n' >&2
   done
 }
 
