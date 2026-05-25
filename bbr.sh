@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.24.4"
+VERSION="2026.05.24.7"
 MIB=1048576
-GIB=$((1024 * MIB))
 AUTO_TCP_CAP=$((2047 * MIB))
 
 ROLE=""
@@ -29,19 +28,13 @@ die() { printf '[x] %s\n' "$*" >&2; exit 1; }
 if [[ -t 1 && -n "${TERM:-}" && "${TERM:-}" != "dumb" ]] && command -v tput >/dev/null 2>&1; then
   BOLD=$(tput bold || true)
   DIM=$(tput dim || true)
-  RED=$(tput setaf 1 || true)
   GREEN=$(tput setaf 2 || true)
-  YELLOW=$(tput setaf 3 || true)
-  BLUE=$(tput setaf 4 || true)
   CYAN=$(tput setaf 6 || true)
   RESET=$(tput sgr0 || true)
 else
   BOLD=""
   DIM=""
-  RED=""
   GREEN=""
-  YELLOW=""
-  BLUE=""
   CYAN=""
   RESET=""
 fi
@@ -63,9 +56,9 @@ prompt_read() {
   local __var="$1" prompt="$2"
   if has_tty; then
     printf '%s' "$prompt" > "$TTY_DEVICE"
-    IFS= read -r "$__var" < "$TTY_DEVICE"
+    IFS= read -r "${__var?}" < "$TTY_DEVICE"
   else
-    IFS= read -r -p "$prompt" "$__var"
+    IFS= read -r -p "$prompt" "${__var?}"
   fi
 }
 
@@ -575,7 +568,8 @@ BACKUP_DIR="$backup_dir"
 restore_or_remove() {
   local path="\$1"
   if [[ -e "\$BACKUP_DIR\$path" ]]; then
-    install -D -m 0644 "\$BACKUP_DIR\$path" "\$path"
+    mkdir -p "\$(dirname "\$path")"
+    cp -a "\$BACKUP_DIR\$path" "\$path"
   else
     rm -f "\$path"
   fi
@@ -588,9 +582,14 @@ restore_or_remove /usr/local/sbin/network-optimize-route.sh
 restore_or_remove /usr/local/sbin/network-optimize-nic.sh
 restore_or_remove /etc/systemd/system/network-optimize-route.service
 restore_or_remove /etc/systemd/system/network-optimize-nic.service
+EOF
+  if [[ -n "${SERVICE_NAME:-}" ]]; then
+    printf 'restore_or_remove %q\n' "/etc/systemd/system/${SERVICE_NAME}.d/override.conf" >> "$rollback"
+  fi
+  cat >> "$rollback" <<'EOF'
 systemctl daemon-reexec 2>/dev/null || true
 systemctl daemon-reload 2>/dev/null || true
-sysctl --system
+sysctl --system || true
 echo "Rollback files restored. Reboot may be needed for conntrack hashsize and route/NIC runtime state."
 EOF
   chmod +x "$rollback"
@@ -841,9 +840,9 @@ UDP_MIN=4096
 [[ "$BUSINESS" == "udp_game" ]] && UDP_MIN=16384
 if [[ "$TARGET" == "throughput" || "$UDP_SESSIONS" -gt 50000 ]]; then UDP_MIN=8192; fi
 UDP_MIN=$(clamp "$UDP_MIN" 4096 65536)
-UDP_MAX_PAGES=$((MEM_AVAIL_KB / 4 * MEM_PCT / 100))
+UDP_MAX_PAGES=$((MEM_AVAIL_KB * MEM_PCT / 400))
 UDP_FLOOR=$(max $(( ($(ceil_div "$UDPR" 4096)) * 4 )) 4096)
-UDP_CAP=$(max $((MEM_TOTAL_KB / 4 * MEM_PCT / 100)) "$UDP_FLOOR")
+UDP_CAP=$(max $((MEM_TOTAL_KB * MEM_PCT / 400)) "$UDP_FLOOR")
 UDP_MAX_PAGES=$(clamp "$UDP_MAX_PAGES" "$UDP_FLOOR" "$UDP_CAP")
 UDP_LOW=$((UDP_MAX_PAGES / 2))
 UDP_PRESSURE=$((UDP_MAX_PAGES * 3 / 4))
@@ -1061,6 +1060,7 @@ cat > "$ROUTE_OUT" <<EOF
 set -euo pipefail
 apply_init() {
   local family="\$1" line clean
+  local -a route_parts
   if [[ "\$family" == "4" ]]; then
     ip route show default 2>/dev/null
   else
@@ -1068,10 +1068,11 @@ apply_init() {
   fi | while IFS= read -r line; do
     [[ -z "\$line" ]] && continue
     clean=\$(printf '%s' "\$line" | sed -E 's/ initcwnd [0-9]+//g; s/ initrwnd [0-9]+//g')
+    read -r -a route_parts <<< "\$clean"
     if [[ "\$family" == "4" ]]; then
-      ip route replace \$clean initcwnd $INITCWND initrwnd $INITCWND || true
+      ip route replace "\${route_parts[@]}" initcwnd $INITCWND initrwnd $INITCWND || true
     else
-      ip -6 route replace \$clean initcwnd $INITCWND initrwnd $INITCWND || true
+      ip -6 route replace "\${route_parts[@]}" initcwnd $INITCWND initrwnd $INITCWND || true
     fi
   done
 }
