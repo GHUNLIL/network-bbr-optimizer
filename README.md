@@ -6,6 +6,8 @@
 
 默认业务按 `TCP+UDP 双优化` 处理，不只偏 TCP；UDP 会话、UDP socket 缓冲、netdev 队列、conntrack UDP 容量、socket 默认缓冲、短连接回收和常见 TCP 基础能力都会一起计算。
 
+脚本会在应用配置前尝试加载 `tcp_bbr` 和 `sch_fq` 模块，并写入 `/etc/modules-load.d/99-network-optimize.conf` 让它们开机加载。这样普通 BBR1 内核即使初始只显示 `cubic reno`，只要系统提供 `tcp_bbr` 模块，也会正确切到 `net.ipv4.tcp_congestion_control = bbr`。
+
 ## 一键运行
 
 推荐使用下面这个命令进入上下键可视化菜单：
@@ -97,6 +99,7 @@ bash bbr.sh --out-dir /root/bbr-output
 - 纯转发节点不会默认开启 TCP Fast Open，因为 nftables 内核转发不终止 TCP 连接，单边开启 TFO 对被转发连接没有实际帮助。
 - 落地节点默认不启用内核转发；只有机器同时承担 NAT、路由或 nftables 转发时才需要开启。
 - 脚本会在应用实时配置前生成回滚文件。
+- BBR1/未知内核都会尝试启用 `bbr` 拥塞控制；`BBR3` 选项只影响计算倍数和 ECN 策略，不代表只有 BBR3 才能启用 BBR。
 
 ## 术语备注
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.28.1"
+VERSION="2026.05.28.2"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -691,6 +691,38 @@ read_sysctl() {
   sysctl -n "$key" 2>/dev/null || printf '%s\n' "$fallback"
 }
 
+module_available() {
+  local module="$1" kernel path
+  if command -v modinfo >/dev/null 2>&1 && modinfo "$module" >/dev/null 2>&1; then
+    return 0
+  fi
+  kernel="$(uname -r 2>/dev/null || true)"
+  [[ -n "$kernel" ]] || return 1
+  for path in \
+    "/lib/modules/$kernel/kernel" \
+    "/usr/lib/modules/$kernel/kernel" \
+    "/lib/modules/$kernel" \
+    "/usr/lib/modules/$kernel"; do
+    [[ -d "$path" ]] || continue
+    if find "$path" -type f \( -name "${module}.ko" -o -name "${module}.ko.*" \) -print -quit 2>/dev/null | grep -q .; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+try_load_module() {
+  local module="$1"
+  if command -v modprobe >/dev/null 2>&1 && is_root; then
+    modprobe "$module" >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+bbr_available_now() {
+  grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null
+}
+
 mem_kb() {
   awk -v key="$1" '$1 == key ":" { print $2; found=1 } END { if (!found) print 0 }' /proc/meminfo
 }
@@ -759,6 +791,7 @@ apply_generated_sysctl_live() {
 
 print_final_sysctl_status() {
   printf '\n最终生效检查:\n'
+  print_live_sysctl net.ipv4.tcp_available_congestion_control
   print_live_sysctl net.ipv4.tcp_congestion_control
   print_live_sysctl net.core.default_qdisc
   print_live_sysctl net.ipv4.tcp_fastopen
@@ -802,6 +835,7 @@ restore_or_remove /etc/sysctl.d/99-network-optimize.conf
 restore_or_remove /etc/security/limits.d/99-network-optimize.conf
 restore_or_remove /etc/systemd/system.conf.d/99-network-optimize.conf
 restore_or_remove /etc/modprobe.d/nf_conntrack.conf
+restore_or_remove /etc/modules-load.d/99-network-optimize.conf
 restore_or_remove /usr/local/sbin/network-optimize-route.sh
 restore_or_remove /usr/local/sbin/network-optimize-nic.sh
 restore_or_remove /etc/systemd/system/network-optimize-route.service
@@ -879,6 +913,7 @@ SYSCTL_OUT="$OUT_DIR/99-network-optimize.conf"
 LIMITS_OUT="$OUT_DIR/99-network-optimize-limits.conf"
 SYSTEMD_OUT="$OUT_DIR/99-network-optimize-system.conf"
 MODPROBE_OUT="$OUT_DIR/nf_conntrack.conf"
+MODULES_LOAD_OUT="$OUT_DIR/99-network-optimize-modules.conf"
 ROUTE_OUT="$OUT_DIR/network-optimize-route.sh"
 NIC_OUT="$OUT_DIR/network-optimize-nic.sh"
 REPORT_OUT="$OUT_DIR/report.txt"
@@ -1241,11 +1276,14 @@ RP_FILTER=2
   printf '# 角色=%s 场景=%s 目标=%s 业务=%s\n\n' "$(role_label)" "$(scene_label)" "$(target_label)" "$(business_label)"
 } >> "$SYSCTL_OUT"
 
+try_load_module tcp_bbr || true
+try_load_module sch_fq || true
+
 emit_sysctl net.core.default_qdisc fq
-if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+if bbr_available_now || module_available tcp_bbr; then
   emit_sysctl net.ipv4.tcp_congestion_control bbr
 else
-  printf '# 已跳过: net.ipv4.tcp_available_congestion_control 中没有 bbr\n' >> "$SYSCTL_OUT"
+  printf '# 已跳过: 当前内核没有暴露 bbr，且未发现 tcp_bbr 模块\n' >> "$SYSCTL_OUT"
 fi
 emit_sysctl fs.file-max "$FS_FILE_MAX"
 emit_sysctl net.core.rmem_max "$TCP_MAX"
@@ -1364,6 +1402,12 @@ else
 EOF
 fi
 
+cat > "$MODULES_LOAD_OUT" <<'EOF'
+# Network BBR Optimizer: load TCP BBR and fq qdisc modules before sysctl applies.
+tcp_bbr
+sch_fq
+EOF
+
 cat > "$ROUTE_OUT" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1460,13 +1504,14 @@ TFO黑洞检测=${TFO_BLACKHOLE:-已跳过}
 nf_conntrack_max=$NF_CONNTRACK_MAX
 nf_conntrack_buckets=$NF_CONNTRACK_BUCKETS
 不需要conntrack时的安全回落上限=$NF_CONNTRACK_RESET_MAX
+模块开机加载=tcp_bbr, sch_fq
 
 应用层 mux/multiplex：本脚本不会开启。
 EOF
 
 printf '\n已生成文件:\n'
 printf '  %s\n' "$SYSCTL_OUT" "$LIMITS_OUT" "$SYSTEMD_OUT" "$ROUTE_OUT" "$NIC_OUT" "$REPORT_OUT"
-printf '  %s\n' "$MODPROBE_OUT"
+printf '  %s\n' "$MODPROBE_OUT" "$MODULES_LOAD_OUT"
 [[ -n "${SERVICE_DROPIN:-}" ]] && printf '  %s\n' "$SERVICE_DROPIN"
 
 if [[ "$APPLY_MODE" == "no" ]]; then
@@ -1498,6 +1543,7 @@ install_file "$SYSCTL_OUT" /etc/sysctl.d/99-network-optimize.conf 0644 "$BACKUP_
 install_file "$LIMITS_OUT" /etc/security/limits.d/99-network-optimize.conf 0644 "$BACKUP_DIR"
 install_file "$SYSTEMD_OUT" /etc/systemd/system.conf.d/99-network-optimize.conf 0644 "$BACKUP_DIR"
 install_file "$MODPROBE_OUT" /etc/modprobe.d/nf_conntrack.conf 0644 "$BACKUP_DIR"
+install_file "$MODULES_LOAD_OUT" /etc/modules-load.d/99-network-optimize.conf 0644 "$BACKUP_DIR"
 install_file "$ROUTE_OUT" /usr/local/sbin/network-optimize-route.sh 0755 "$BACKUP_DIR"
 install_file "$NIC_OUT" /usr/local/sbin/network-optimize-nic.sh 0755 "$BACKUP_DIR"
 
@@ -1534,6 +1580,8 @@ if [[ -n "${SERVICE_DROPIN:-}" ]]; then
   install_file "$SERVICE_DROPIN" "/etc/systemd/system/${SERVICE_NAME}.d/override.conf" 0644 "$BACKUP_DIR"
 fi
 
+try_load_module tcp_bbr || warn "tcp_bbr 模块加载失败；如果最终仍是 cubic，说明当前内核没有 BBR 模块或被宿主限制。"
+try_load_module sch_fq || warn "sch_fq 模块加载失败；如果 default_qdisc=fq 应用失败，说明当前内核没有 fq qdisc 模块或被宿主限制。"
 sysctl --system
 apply_generated_sysctl_live "$SYSCTL_OUT"
 if [[ "$CT_NEEDED" != "yes" ]] && sysctl_exists net.netfilter.nf_conntrack_max; then
