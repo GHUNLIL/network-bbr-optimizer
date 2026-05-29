@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.28.2"
+VERSION="2026.05.28.3"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -185,7 +185,7 @@ clear_ui() {
 banner() {
   clear_ui
   printf '%sNetwork BBR Optimizer / 中文 BBR 网络优化器%s  %s%s%s\n' "$BOLD" "$RESET" "$CYAN" "$VERSION" "$RESET"
-  printf '目标: 极致满速 + 可控低抖动 | 默认不启用应用层 mux\n'
+  printf '固定策略: 极致满速 + TCP+UDP 双优化 + 可控低抖动 | 默认不启用应用层 mux\n'
   printf '术语: BBR/TFO/RPS/nftables/conntrack/sysctl 保留英文；选项内附中文备注\n'
   hr
 }
@@ -236,7 +236,7 @@ show_summary() {
   printf '%s待生效配置草案%s\n' "$BOLD" "$RESET"
   printf '  说明            : 这里是你修改后的待生成/待应用配置，不是当前系统已生效值。\n'
   printf '  角色/场景      : %s / %s\n' "$(role_label)" "$(scene_label)"
-  printf '  目标/业务      : %s / %s\n' "$(target_label)" "$(business_label)"
+  printf '  固定策略        : %s / %s\n' "$(target_label)" "$(business_label)"
   printf '  带宽 Mbps      : 上行 %s / 下行 %s\n' "$UP_MBPS" "$DOWN_MBPS"
   printf '  RTT ms         : 上游 %s / 下游 %s\n' "$UP_RTT" "$DOWN_RTT"
   printf '  丢包/抖动      : %s%% / %sms\n' "$LOSS_PCT" "$JITTER_MS"
@@ -344,7 +344,7 @@ clean_legacy_outputs() {
 edit_role_scene() {
   local tcp_default
   banner
-  printf '%srole / scene / business 角色、场景与业务%s\n' "$BOLD" "$RESET"
+  printf '%srole / scene 角色与转发场景%s\n' "$BOLD" "$RESET"
   ROLE=$(ask_choice "role 机器角色" "$ROLE" forwarding landing)
   if [[ "$ROLE" == "forwarding" ]]; then
     SCENE=$(ask_choice "scene 转发场景" "${SCENE:-plain}" front ix relay international plain)
@@ -359,8 +359,8 @@ edit_role_scene() {
     [[ "$tcp_default" == "no" || "$tcp_default" == "auto" ]] && tcp_default="yes"
     LOCAL_TCP_TERMINATION=$(ask_yes_no "local TCP termination 落地机是否本机终止 TCP，例如 Xray/GOST/Web/代理监听服务" "$tcp_default")
   fi
-  TARGET=$(ask_choice "target 优化目标" "$TARGET" speed throughput)
-  BUSINESS=$(ask_choice "business 业务类型" "$BUSINESS" mixed tcp udp_game web)
+  TARGET="speed"
+  BUSINESS="mixed"
 }
 
 edit_link() {
@@ -404,14 +404,14 @@ edit_capacity() {
   CPS_OVERRIDE=$(to_int "$(ask "CPS override 每秒新建连接覆盖，0=自动" "$CPS_OVERRIDE")")
   MANUAL_TCP_CAP_MB=$(to_int "$(ask "tcp_max cap MB 单连接 TCP 上限，0=自动" "$MANUAL_TCP_CAP_MB")")
   MANUAL_BDP_MULT=$(to_int "$(ask "BDP multiplier override BDP 倍数覆盖，0=自动" "$MANUAL_BDP_MULT")")
-  BBR_KIND=$(ask_choice "BBR kind/version BBR 版本假设" "$BBR_KIND" bbr1 bbr3 unknown)
+  BBR_KIND="unknown"
   SERVICE_NAME=$(ask "systemd service name 可选服务名，用于 LimitNOFILE drop-in，空=跳过" "$SERVICE_NAME")
 }
 
 interactive_menu() {
   local choice key cursor=0 count=9 i answer
   local options=(
-    "role/scene/business - 角色、场景、业务类型"
+    "role/scene - 角色、转发场景"
     "bandwidth/RTT/loss - 链路带宽、延迟、丢包抖动"
     "NIC/RPS/busy_poll - 网卡队列、收包分流、低延迟轮询"
     "TFO/handshake/mux - TCP Fast Open、握手优化、mux 说明"
@@ -494,8 +494,8 @@ linear_wizard() {
     [[ "$LANDING_ROUTES" == "yes" ]] && STATEFUL="yes" || STATEFUL="no"
   fi
 
-  TARGET=$(ask_choice "target 优化目标" "$TARGET" speed throughput)
-  BUSINESS=$(ask_choice "business 业务类型" "$BUSINESS" mixed tcp udp_game web)
+  TARGET="speed"
+  BUSINESS="mixed"
 
   UP_MBPS=$(to_int "$(ask "upload/ingress Mbps 上行/入口带宽" "$UP_MBPS")")
   DOWN_MBPS=$(to_int "$(ask "download/egress Mbps 下行/出口带宽" "$DOWN_MBPS")")
@@ -523,7 +523,7 @@ linear_wizard() {
   BUSY_MODE=$(ask_choice "busy_poll mode 低延迟轮询模式" "$BUSY_MODE" auto force off)
   MANUAL_TCP_CAP_MB=$(to_int "$(ask "tcp_max cap MB 单连接 TCP 上限，0=自动" "$MANUAL_TCP_CAP_MB")")
   MANUAL_BDP_MULT=$(to_int "$(ask "BDP multiplier override BDP 倍数覆盖，0=自动" "$MANUAL_BDP_MULT")")
-  BBR_KIND=$(ask_choice "BBR kind/version BBR 版本假设" "$BBR_KIND" bbr1 bbr3 unknown)
+  BBR_KIND="unknown"
   TCP_CONNS_OVERRIDE=$(to_int "$(ask "TCP connections override TCP 并发覆盖，0=自动" "$TCP_CONNS_OVERRIDE")")
   UDP_SESSIONS_OVERRIDE=$(to_int "$(ask "UDP sessions override UDP 会话覆盖，0=自动" "$UDP_SESSIONS_OVERRIDE")")
   CPS_OVERRIDE=$(to_int "$(ask "CPS override 每秒新建连接覆盖，0=自动" "$CPS_OVERRIDE")")
@@ -535,6 +535,7 @@ usage() {
 Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
 
 交互式 Linux 网络优化脚本，面向极致专用转发节点和落地节点。
+固定策略为极致满速 + TCP+UDP 双优化 + 可控低抖动，不再询问容易误选的业务/目标分支。
 
 用法:
   bash bbr.sh             # 上下键可视化菜单，先生成配置，再确认是否应用

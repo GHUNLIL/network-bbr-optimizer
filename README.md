@@ -2,7 +2,7 @@
 
 中文交互式 Linux BBR 与网络转发优化脚本，面向专用转发节点、IX 专线转发、线路中继、国际互联转发和落地节点。
 
-默认目标是“极致满速 + 可控低抖动”：让测速、新连接和长 RTT 链路尽快跑满，同时限制队列深度，避免无意义堆积。脚本会生成并可应用 BBR、sysctl、RPS、conntrack、initcwnd、nofile、TCP Fast Open 等配置；应用层 mux/smux/yamux/multiplex 默认不会开启。
+固定目标是“极致满速 + TCP+UDP 双优化 + 可控低抖动”：让测速、新连接和长 RTT 链路尽快跑满，同时限制队列深度，避免无意义堆积。脚本会生成并可应用 BBR、sysctl、RPS、conntrack、initcwnd、nofile、TCP Fast Open 等配置；应用层 mux/smux/yamux/multiplex 默认不会开启。
 
 默认业务按 `TCP+UDP 双优化` 处理，不只偏 TCP；UDP 会话、UDP socket 缓冲、netdev 队列、conntrack UDP 容量、socket 默认缓冲、短连接回收和常见 TCP 基础能力都会一起计算。
 
@@ -53,6 +53,8 @@ bash bbr.sh --help          # 查看帮助
 ## 菜单变化
 
 打开脚本时，主界面优先显示“系统已生效参数”，也就是从当前机器实时读取到的内核配置。修改 1-5 项之后，界面才会切换为“待生效配置草案”，避免把脚本默认值误认为系统当前值。
+
+交互界面不再询问“优化目标”“业务类型”“BBR 版本假设”这几个容易误选的分支；脚本固定使用极致满速、`TCP+UDP 双优化` 和 BBR 自动/未知公式。需要调整强度时，使用带宽、RTT、丢包、抖动和高级覆盖项。
 
 界面会保留 `BBR`、`TFO`、`RPS`、`nftables`、`conntrack`、`sysctl`、`busy_poll` 等英文技术术语，并在菜单选项和问题标题里附中文备注。例如 `NIC/RPS/busy_poll - 网卡队列、收包分流、低延迟轮询`。
 
