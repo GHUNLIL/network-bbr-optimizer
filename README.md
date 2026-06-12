@@ -12,6 +12,8 @@
 
 conntrack 会区分连接上限和 hash 表大小：`nf_conntrack_max` 仍按机器角色、带宽、会话量和内存预算计算，`hashsize` 会按连接上限约 `1/8` 写入。这样可以避免某些内核在 `nf_conntrack` 模块加载时，把运行态连接上限自动膨胀到脚本目标值的数倍。
 
+容量与高级覆盖里可以选择“会话表并发强度”：默认 `auto` 会按场景、带宽和内存自动判断。中高带宽的状态转发前置/IX 机器会自动提升到 `high`，大内存千兆 IX 机器才会升到 `extreme`。`high` 会提高 conntrack、nofile、listen backlog、SYN backlog、TIME_WAIT 和 netdev 队列容量，`extreme` 更激进但仍受内存预算保护。
+
 脚本会在应用配置前尝试加载 `tcp_bbr` 和 `sch_fq` 模块，并写入 `/etc/modules-load.d/99-network-optimize.conf` 让它们开机加载。这样普通 BBR1 内核即使初始只显示 `cubic reno`，只要系统提供 `tcp_bbr` 模块，也会正确切到 `net.ipv4.tcp_congestion_control = bbr`。
 
 ## 一键运行

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.28.6"
+VERSION="2026.05.28.7"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -18,6 +18,7 @@ ROLE=""
 SCENE=""
 TARGET="speed"
 BUSINESS="mixed"
+CONCURRENCY_MODE="auto"
 STATEFUL="yes"
 LANDING_ROUTES="no"
 IPV6_RA="ask"
@@ -103,7 +104,10 @@ choice_label() {
     tcp) printf 'tcp TCP 长连接 - 长连接、代理隧道或大流量 TCP' ;;
     udp_game) printf 'udp_game UDP 游戏/实时 - 游戏、语音、实时 UDP' ;;
     web) printf 'web Web/HTTPS - 网站、API、短连接 HTTPS' ;;
-    auto) printf 'auto 自动 - 按带宽/RTT/业务自动判断' ;;
+    balanced) printf 'balanced 均衡并发 - 按带宽/内存自动估算会话表' ;;
+    high) printf 'high 高并发 - 提高 conntrack/nofile/backlog 容量' ;;
+    extreme) printf 'extreme 极高并发 - 更激进提高会话容量，仍受内存保护' ;;
+    auto) printf 'auto 自动 - 按当前参数自动判断' ;;
     force) printf 'force 强制开启 - 跳过自动判断直接启用' ;;
     off) printf 'off 关闭 - 不启用该项' ;;
     bbr1) printf 'BBR1 - 按常见 BBR1 内核计算' ;;
@@ -117,6 +121,9 @@ choice_short_label() {
   case "$1" in
     yes|no) yn_label "$1" ;;
     auto) printf '自动' ;;
+    balanced) printf '均衡并发' ;;
+    high) printf '高并发' ;;
+    extreme) printf '极高并发' ;;
     force) printf '强制开启' ;;
     off) printf '关闭' ;;
     bbr1) printf 'BBR1' ;;
@@ -247,6 +254,7 @@ show_summary() {
     "$(yn_label "$HANDSHAKE")" "$(yn_label "$LOCAL_TCP_TERMINATION")" "$(yn_label "$TFO_GLOBAL")" "$(choice_short_label "$BUSY_MODE")"
   printf '  手动覆盖       : TCP上限=%sMB, BDP倍数=%s, TCP并发=%s, UDP会话=%s, CPS=%s\n' \
     "$MANUAL_TCP_CAP_MB" "$MANUAL_BDP_MULT" "$TCP_CONNS_OVERRIDE" "$UDP_SESSIONS_OVERRIDE" "$CPS_OVERRIDE"
+  printf '  会话表强度     : %s\n' "$(choice_short_label "$CONCURRENCY_MODE")"
   if [[ -n "$SERVICE_NAME" ]]; then
     printf '  服务 nofile    : %s\n' "$SERVICE_NAME"
   fi
@@ -399,6 +407,7 @@ edit_handshake() {
 edit_capacity() {
   banner
   printf '%scapacity / override 容量与高级覆盖%s\n' "$BOLD" "$RESET"
+  CONCURRENCY_MODE=$(ask_choice "session concurrency mode 会话表并发强度" "$CONCURRENCY_MODE" auto balanced high extreme)
   TCP_CONNS_OVERRIDE=$(to_int "$(ask "TCP connections override TCP 并发覆盖，0=自动" "$TCP_CONNS_OVERRIDE")")
   UDP_SESSIONS_OVERRIDE=$(to_int "$(ask "UDP sessions override UDP 会话覆盖，0=自动" "$UDP_SESSIONS_OVERRIDE")")
   CPS_OVERRIDE=$(to_int "$(ask "CPS override 每秒新建连接覆盖，0=自动" "$CPS_OVERRIDE")")
@@ -521,6 +530,7 @@ linear_wizard() {
   fi
   TFO_GLOBAL=$(ask_yes_no "global listener TFO 1024 是否启用全局监听 TFO 位，通常选否" "$TFO_GLOBAL")
   BUSY_MODE=$(ask_choice "busy_poll mode 低延迟轮询模式" "$BUSY_MODE" auto force off)
+  CONCURRENCY_MODE=$(ask_choice "session concurrency mode 会话表并发强度" "$CONCURRENCY_MODE" auto balanced high extreme)
   MANUAL_TCP_CAP_MB=$(to_int "$(ask "tcp_max cap MB 单连接 TCP 上限，0=自动" "$MANUAL_TCP_CAP_MB")")
   MANUAL_BDP_MULT=$(to_int "$(ask "BDP multiplier override BDP 倍数覆盖，0=自动" "$MANUAL_BDP_MULT")")
   BBR_KIND="unknown"
@@ -886,6 +896,7 @@ ROLE="forwarding"
 SCENE="plain"
 TARGET="speed"
 BUSINESS="mixed"
+CONCURRENCY_MODE="auto"
 STATEFUL="yes"
 LANDING_ROUTES="no"
 IPV6_RA="no"
@@ -1000,6 +1011,33 @@ if [[ "$ROLE" == "forwarding" ]]; then
       ;;
   esac
 fi
+
+CONCURRENCY_EFFECTIVE="$CONCURRENCY_MODE"
+LINK_MBPS_FOR_CONCURRENCY=$(max "$UP_MBPS" "$DOWN_MBPS")
+if [[ "$CONCURRENCY_EFFECTIVE" == "auto" ]]; then
+  CONCURRENCY_EFFECTIVE="balanced"
+  if [[ "$ROLE" == "forwarding" && "$STATEFUL" == "yes" ]] && [[ "$SCENE" == "front" || "$SCENE" == "ix" ]] && (( LINK_MBPS_FOR_CONCURRENCY >= 100 )) && (( MEM_TOTAL_KB >= 2048 * 1024 )); then
+    CONCURRENCY_EFFECTIVE="high"
+  fi
+  if [[ "$ROLE" == "forwarding" && "$STATEFUL" == "yes" && "$SCENE" == "ix" ]] && (( LINK_MBPS_FOR_CONCURRENCY >= 1000 )) && (( MEM_TOTAL_KB >= 8192 * 1024 )); then
+    CONCURRENCY_EFFECTIVE="extreme"
+  fi
+fi
+
+case "$CONCURRENCY_EFFECTIVE" in
+  high)
+    TCP_CONNS=$((TCP_CONNS * 13 / 10))
+    UDP_SESSIONS=$((UDP_SESSIONS * 15 / 10))
+    CPS=$((CPS * 13 / 10))
+    MEM_PCT=$((MEM_PCT + 4))
+    ;;
+  extreme)
+    TCP_CONNS=$((TCP_CONNS * 16 / 10))
+    UDP_SESSIONS=$((UDP_SESSIONS * 2))
+    CPS=$((CPS * 16 / 10))
+    MEM_PCT=$((MEM_PCT + 8))
+    ;;
+esac
 
 MEM_PCT=$((MEM_PCT + 14))
 MEM_PCT=$(clamp "$MEM_PCT" 35 78)
@@ -1519,6 +1557,8 @@ cat > "$REPORT_OUT" <<EOF
 TCP并发=$TCP_CONNS
 UDP会话=$UDP_SESSIONS
 每秒新建连接=$CPS
+会话表并发强度=$(choice_short_label "$CONCURRENCY_MODE")
+会话表实际强度=$(choice_short_label "$CONCURRENCY_EFFECTIVE")
 内存预算_pct=$MEM_PCT
 BDP_bytes=$BDP
 BDP倍数=$BDP_MULT
