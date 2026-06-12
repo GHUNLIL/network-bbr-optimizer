@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.28.3"
+VERSION="2026.05.28.4"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -61,7 +61,7 @@ trap restore_terminal EXIT
 trap 'restore_terminal; exit 130' INT TERM
 
 has_tty() {
-  [[ -r "$TTY_DEVICE" && -w "$TTY_DEVICE" ]]
+  [[ -t 0 && -t 1 && -r "$TTY_DEVICE" && -w "$TTY_DEVICE" ]]
 }
 
 prompt_read() {
@@ -899,7 +899,7 @@ UDP_SESSIONS_OVERRIDE=0
 CPS_OVERRIDE=0
 SERVICE_NAME=""
 
-if [[ "$UI_MODE" == "menu" && ( -t 0 || -r "$TTY_DEVICE" ) ]]; then
+if [[ "$UI_MODE" == "menu" ]] && has_tty; then
   interactive_menu
 else
   linear_wizard
@@ -1008,6 +1008,8 @@ UP_BDP=$((UP_MBPS * UP_RTT * 125))
 DOWN_BDP=$((DOWN_MBPS * DOWN_RTT * 125))
 BDP=$(max "$UP_BDP" "$DOWN_BDP")
 MBW=$(max "$UP_MBPS" "$DOWN_MBPS")
+MINBW=$(min "$UP_MBPS" "$DOWN_MBPS")
+MINBW=$(max "$MINBW" 1)
 MAXRTT=$(max "$UP_RTT" "$DOWN_RTT")
 
 if [[ "$BBR_KIND" == "bbr3" ]]; then
@@ -1165,6 +1167,29 @@ else
   INITCWND=160
 fi
 INITCWND=$(clamp "$INITCWND" 32 512)
+INITRWND="$INITCWND"
+LOW_BANDWIDTH_INIT_GUARD="no"
+if [[ "$ROLE" == "forwarding" ]]; then
+  case "$SCENE" in
+    front|ix|relay|international)
+      if (( MINBW <= 2 )); then
+        INITCWND=$(min "$INITCWND" 32)
+        INITRWND=$(min "$INITRWND" 32)
+        LOW_BANDWIDTH_INIT_GUARD="yes"
+      elif (( MINBW <= 10 )); then
+        INITCWND=$(min "$INITCWND" 64)
+        INITRWND=$(min "$INITRWND" 64)
+        LOW_BANDWIDTH_INIT_GUARD="yes"
+      elif (( MINBW <= 20 )); then
+        INITCWND=$(min "$INITCWND" 128)
+        INITRWND=$(min "$INITRWND" 128)
+        LOW_BANDWIDTH_INIT_GUARD="yes"
+      fi
+      ;;
+  esac
+fi
+INITCWND=$(clamp "$INITCWND" 32 512)
+INITRWND=$(clamp "$INITRWND" 32 512)
 
 MIN_RTT_WLEN=120
 [[ "$TARGET" == "throughput" ]] && MIN_RTT_WLEN=180
@@ -1424,9 +1449,9 @@ apply_init() {
     clean=\$(printf '%s' "\$line" | sed -E 's/ initcwnd [0-9]+//g; s/ initrwnd [0-9]+//g')
     read -r -a route_parts <<< "\$clean"
     if [[ "\$family" == "4" ]]; then
-      ip route replace "\${route_parts[@]}" initcwnd $INITCWND initrwnd $INITCWND || true
+      ip route replace "\${route_parts[@]}" initcwnd $INITCWND initrwnd $INITRWND || true
     else
-      ip -6 route replace "\${route_parts[@]}" initcwnd $INITCWND initrwnd $INITCWND || true
+      ip -6 route replace "\${route_parts[@]}" initcwnd $INITCWND initrwnd $INITRWND || true
     fi
   done
 }
@@ -1490,7 +1515,9 @@ BDP倍数=$BDP_MULT
 TCP缓冲上限=$TCP_MAX
 socket默认缓冲=$SOCK_DEFAULT
 tcp_limit_output_bytes=$TCP_LIMIT
+低带宽初始窗口保护=$LOW_BANDWIDTH_INIT_GUARD
 initcwnd=$INITCWND
+initrwnd=$INITRWND
 nofile=$NOFILE
 TIME_WAIT上限=$TW_BUCKETS
 fin_timeout=$FIN_TIMEOUT
