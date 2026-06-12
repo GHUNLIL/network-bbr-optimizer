@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.28.5"
+VERSION="2026.05.28.6"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -1264,7 +1264,8 @@ CT_RAW=$((TCP_CONNS + UDP_SESSIONS * 2 + CPS * 90))
 CT_MEM_CAP=$((MEM_TOTAL_BYTES * MEM_PCT / 100 / 512))
 CT_UPPER=$(min 16777216 "$(max 131072 "$CT_MEM_CAP")")
 NF_CONNTRACK_MAX=$(clamp "$(pow2ceil "$CT_RAW")" 131072 "$CT_UPPER")
-NF_CONNTRACK_BUCKETS=$(pow2ceil "$(clamp "$NF_CONNTRACK_MAX" 32768 16777216)")
+NF_CONNTRACK_HASH_RAW=$(ceil_div "$NF_CONNTRACK_MAX" 8)
+NF_CONNTRACK_BUCKETS=$(pow2ceil "$(clamp "$NF_CONNTRACK_HASH_RAW" 32768 16777216)")
 CT_RESET_RAW=$((TCP_CONNS / 2 + UDP_SESSIONS + CPS * 30))
 CT_RESET_MEM_CAP=$((MEM_TOTAL_BYTES / 8192))
 CT_RESET_UPPER=$(min 2097152 "$(max 131072 "$CT_RESET_MEM_CAP")")
@@ -1539,7 +1540,7 @@ TFO值=${TFO_VALUE:-已跳过}
 TFO黑洞检测=${TFO_BLACKHOLE:-已跳过}
 需要conntrack=$CT_NEEDED
 nf_conntrack_max=$NF_CONNTRACK_MAX
-nf_conntrack_buckets=$NF_CONNTRACK_BUCKETS
+nf_conntrack_hashsize=$NF_CONNTRACK_BUCKETS
 不需要conntrack时的安全回落上限=$NF_CONNTRACK_RESET_MAX
 模块开机加载=tcp_bbr, sch_fq
 
