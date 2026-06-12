@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.28.7"
+VERSION="2026.05.28.8"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -807,6 +807,20 @@ disable_legacy_initcwnd_enforcer() {
     systemctl disable --now initcwnd-enforcer.timer >/dev/null 2>&1 || true
     systemctl reset-failed initcwnd-enforcer.service initcwnd-enforcer.timer >/dev/null 2>&1 || true
   fi
+}
+
+sync_conntrack_hashsize_live() {
+  local path="/sys/module/nf_conntrack/parameters/hashsize" current
+  [[ "$CT_NEEDED" == "yes" ]] || return 0
+  [[ -e "$path" ]] || return 0
+  current="$(cat "$path" 2>/dev/null || true)"
+  [[ "$current" == "$NF_CONNTRACK_BUCKETS" ]] && return 0
+  if [[ -w "$path" ]]; then
+    if printf '%s' "$NF_CONNTRACK_BUCKETS" > "$path" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  warn "nf_conntrack hashsize 当前运行值未能同步到 $NF_CONNTRACK_BUCKETS，重启后会按 /etc/modprobe.d/nf_conntrack.conf 生效。"
 }
 
 print_final_sysctl_status() {
@@ -1663,6 +1677,7 @@ try_load_module sch_fq || warn "sch_fq 模块加载失败；如果 default_qdisc
 disable_legacy_initcwnd_enforcer
 sysctl --system
 apply_generated_sysctl_live "$SYSCTL_OUT"
+sync_conntrack_hashsize_live
 if [[ "$CT_NEEDED" != "yes" ]] && sysctl_exists net.netfilter.nf_conntrack_max; then
   CT_CURRENT="$(read_sysctl net.netfilter.nf_conntrack_max 0)"
   CT_COUNT="$(read_sysctl net.netfilter.nf_conntrack_count 0)"
