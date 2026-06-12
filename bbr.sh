@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.28.4"
+VERSION="2026.05.28.5"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -788,6 +788,15 @@ apply_generated_sysctl_live() {
     [[ -n "$key" ]] || continue
     sysctl -w "$key=$value" >/dev/null 2>&1 || warn "运行时应用失败: $key=$value"
   done < "$file"
+}
+
+disable_legacy_initcwnd_enforcer() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+  if [[ -e /etc/systemd/system/initcwnd-enforcer.timer || -e /etc/systemd/system/initcwnd-enforcer.service || -e /usr/local/bin/enforce-initcwnd.sh ]]; then
+    warn "发现旧版 initcwnd-enforcer，已停用，避免和 network-optimize-route.service 抢 initcwnd/initrwnd。"
+    systemctl disable --now initcwnd-enforcer.timer >/dev/null 2>&1 || true
+    systemctl reset-failed initcwnd-enforcer.service initcwnd-enforcer.timer >/dev/null 2>&1 || true
+  fi
 }
 
 print_final_sysctl_status() {
@@ -1610,6 +1619,7 @@ fi
 
 try_load_module tcp_bbr || warn "tcp_bbr 模块加载失败；如果最终仍是 cubic，说明当前内核没有 BBR 模块或被宿主限制。"
 try_load_module sch_fq || warn "sch_fq 模块加载失败；如果 default_qdisc=fq 应用失败，说明当前内核没有 fq qdisc 模块或被宿主限制。"
+disable_legacy_initcwnd_enforcer
 sysctl --system
 apply_generated_sysctl_live "$SYSCTL_OUT"
 if [[ "$CT_NEEDED" != "yes" ]] && sysctl_exists net.netfilter.nf_conntrack_max; then

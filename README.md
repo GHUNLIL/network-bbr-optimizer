@@ -8,6 +8,8 @@
 
 低带宽跨境转发会自动收敛路由初始窗口：当前置入口、IX 专线、线路中继或国际互联场景的瓶颈带宽不高于 `10Mbps` 时，脚本会把 `initcwnd/initrwnd` 从高强度测速窗口降到更稳的低突发窗口。例如 `5Mbps` IX 专线会生成 `initcwnd 64 initrwnd 64`，避免一开连接就把小带宽链路塞出排队和抖动。
 
+应用新版配置时，脚本会停用旧版安装可能残留的 `initcwnd-enforcer.timer`。这个旧定时器会定期改默认路由窗口，可能和新版 `network-optimize-route.service` 抢 `initcwnd/initrwnd`，也可能在新配置下反复失败刷日志。
+
 脚本会在应用配置前尝试加载 `tcp_bbr` 和 `sch_fq` 模块，并写入 `/etc/modules-load.d/99-network-optimize.conf` 让它们开机加载。这样普通 BBR1 内核即使初始只显示 `cubic reno`，只要系统提供 `tcp_bbr` 模块，也会正确切到 `net.ipv4.tcp_congestion_control = bbr`。
 
 ## 一键运行
