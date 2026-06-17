@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.17.3"
+VERSION="2026.06.17.4"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -19,10 +19,10 @@ SCENE=""
 TARGET="speed"
 BUSINESS="mixed"
 CONCURRENCY_MODE="auto"
-STATEFUL="yes"
-LANDING_ROUTES="no"
-IPV6_RA="ask"
-MULTIPATH="yes"
+STATEFUL="auto"
+LANDING_ROUTES="auto"
+IPV6_RA="auto"
+MULTIPATH="auto"
 HANDSHAKE="yes"
 TFO_GLOBAL="no"
 LOCAL_TCP_TERMINATION="auto"
@@ -241,6 +241,7 @@ business_label() {
 }
 
 show_summary() {
+  infer_auto_topology
   printf '%s待生效配置草案%s\n' "$BOLD" "$RESET"
   printf '  说明            : 这里是你修改后的待生成/待应用配置，不是当前系统已生效值。\n'
   printf '  角色/场景      : %s / %s\n' "$(role_label)" "$(scene_label)"
@@ -249,7 +250,7 @@ show_summary() {
   printf '  RTT ms         : 上游 %s / 下游 %s\n' "$UP_RTT" "$DOWN_RTT"
   printf '  丢包/抖动      : %s%% / %sms\n' "$LOSS_PCT" "$JITTER_MS"
   printf '  自动检测        : 网卡 %s / RX %s / TX %s / CPU %s\n' "$DEFAULT_IFACE" "$RX_QUEUES" "$TX_QUEUES" "$CPU_COUNT"
-  printf '  转发状态       : 状态规则=%s, 落地路由=%s, 多出口/策略路由=%s, IPv6 RA=%s\n' \
+  printf '  自动拓扑        : 状态规则=%s, 落地路由=%s, 多出口/策略路由=%s, IPv6 RA=%s\n' \
     "$(yn_label "$STATEFUL")" "$(yn_label "$LANDING_ROUTES")" "$(yn_label "$MULTIPATH")" "$(yn_label "$IPV6_RA")"
   printf '  自动策略        : TFO=%s, 本机终止 TCP=%s, 全局监听 TFO=%s, busy_poll=%s\n' \
     "$(yn_label "$HANDSHAKE")" "$(yn_label "$LOCAL_TCP_TERMINATION")" "$(yn_label "$TFO_GLOBAL")" "$(choice_short_label "$BUSY_MODE")"
@@ -349,25 +350,17 @@ clean_legacy_outputs() {
 }
 
 edit_role_scene() {
-  local tcp_default
   banner
   printf '%srole / scene 角色与转发场景%s\n' "$BOLD" "$RESET"
   ROLE=$(ask_choice "role 机器角色" "$ROLE" forwarding landing)
   if [[ "$ROLE" == "forwarding" ]]; then
     SCENE=$(ask_choice "scene 转发场景" "${SCENE:-plain}" front ix relay international plain)
-    STATEFUL=$(ask_yes_no "stateful nftables 是否 NAT/TProxy/状态规则" "$STATEFUL")
-    LANDING_ROUTES="no"
-    LOCAL_TCP_TERMINATION=$(ask_yes_no "local TCP termination 本机是否也终止 TCP，例如代理/Web 监听服务" "$LOCAL_TCP_TERMINATION")
   else
     SCENE="landing"
-    LANDING_ROUTES=$(ask_yes_no "landing routes 落地机是否同时做 NAT/路由" "$LANDING_ROUTES")
-    [[ "$LANDING_ROUTES" == "yes" ]] && STATEFUL="yes" || STATEFUL="no"
-    tcp_default="$LOCAL_TCP_TERMINATION"
-    [[ "$tcp_default" == "no" || "$tcp_default" == "auto" ]] && tcp_default="yes"
-    LOCAL_TCP_TERMINATION=$(ask_yes_no "local TCP termination 落地机是否本机终止 TCP，例如 Xray/GOST/Web/代理监听服务" "$tcp_default")
   fi
   TARGET="speed"
   BUSINESS="mixed"
+  infer_auto_topology
 }
 
 edit_link() {
@@ -379,8 +372,7 @@ edit_link() {
   DOWN_RTT=$(to_int "$(ask "downstream RTT ms 到下一跳/出口侧延迟" "$DOWN_RTT")")
   LOSS_PCT=$(ask "loss percentage 丢包率百分比，例如 0 或 0.3" "$LOSS_PCT")
   JITTER_MS=$(to_int "$(ask "jitter ms 抖动" "$JITTER_MS")")
-  MULTIPATH=$(ask_yes_no "multipath/policy routing 是否多出口/策略路由/非对称回程" "$MULTIPATH")
-  IPV6_RA=$(ask_yes_no "IPv6 RA 默认路由是否依赖路由通告" "$IPV6_RA")
+  infer_auto_topology
 }
 
 interactive_menu() {
@@ -452,14 +444,8 @@ linear_wizard() {
   ROLE=$(ask_choice "role 机器角色" "$ROLE" forwarding landing)
   if [[ "$ROLE" == "forwarding" ]]; then
     SCENE=$(ask_choice "scene 转发场景" "$SCENE" front ix relay international plain)
-    STATEFUL=$(ask_yes_no "stateful nftables 是否 NAT/TProxy/状态规则" "$STATEFUL")
-    LANDING_ROUTES="no"
-    LOCAL_TCP_TERMINATION="no"
   else
     SCENE="landing"
-    LANDING_ROUTES=$(ask_yes_no "landing routes 落地机是否同时做 NAT/路由" "$LANDING_ROUTES")
-    [[ "$LANDING_ROUTES" == "yes" ]] && STATEFUL="yes" || STATEFUL="no"
-    LOCAL_TCP_TERMINATION="yes"
   fi
 
   TARGET="speed"
@@ -472,8 +458,6 @@ linear_wizard() {
   LOSS_PCT=$(ask "loss percentage 丢包率百分比，例如 0 或 0.3" "$LOSS_PCT")
   JITTER_MS=$(to_int "$(ask "jitter ms 抖动" "$JITTER_MS")")
 
-  MULTIPATH=$(ask_yes_no "multipath/policy routing 是否多出口/策略路由/非对称回程" "$MULTIPATH")
-  IPV6_RA=$(ask_yes_no "IPv6 RA 默认路由是否依赖路由通告" "$IPV6_RA")
   HANDSHAKE="yes"
   TFO_GLOBAL="no"
   BUSY_MODE="auto"
@@ -485,6 +469,7 @@ linear_wizard() {
   UDP_SESSIONS_OVERRIDE=0
   CPS_OVERRIDE=0
   SERVICE_NAME=""
+  infer_auto_topology
 }
 
 usage() {
@@ -492,7 +477,7 @@ usage() {
 Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
 
 交互式 Linux 网络优化脚本，面向极致专用转发节点和落地节点。
-固定策略为极致满速 + TCP+UDP 双优化 + 可控低抖动，不再询问容易误选的业务/目标分支。
+固定策略为极致满速 + TCP+UDP 双优化 + 可控低抖动，不再询问容易误选的业务/目标/拓扑分支。
 
 用法:
   bash bbr.sh             # 上下键可视化菜单，先生成配置，再确认是否应用
@@ -513,7 +498,7 @@ Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
   不再在 /root 下面刷出一堆 network-optimize-backup-*。
 
 默认不启用应用层 mux/multiplex。
-界面保留 BBR/TFO/RPS/nftables/conntrack/sysctl 等英文术语；自动项不再单独占主菜单。
+界面保留 BBR/TFO/RPS/nftables/conntrack/sysctl 等英文术语；stateful、多出口、IPv6 RA、RPS、TFO、busy_poll、会话表等自动项不再单独占主菜单。
 
 术语说明:
   BBR/BBR3: Linux TCP 拥塞控制算法名。
@@ -688,9 +673,183 @@ mem_kb() {
 }
 
 detect_default_iface() {
+  command -v ip >/dev/null 2>&1 || return 0
   ip route show default 2>/dev/null | awk '{
     for (i=1; i<=NF; i++) if ($i == "dev") { print $(i+1); exit }
   }'
+}
+
+default_route_count() {
+  local family="${1:-4}"
+  command -v ip >/dev/null 2>&1 || { printf '0\n'; return 0; }
+  if [[ "$family" == "6" ]]; then
+    ip -6 route show default 2>/dev/null | awk 'END { print NR + 0 }'
+  else
+    ip route show default 2>/dev/null | awk 'END { print NR + 0 }'
+  fi
+}
+
+policy_routing_present() {
+  command -v ip >/dev/null 2>&1 || return 1
+  ip rule show 2>/dev/null | awk '
+    {
+      line=$0
+      sub(/^[[:space:]]*[0-9]+:[[:space:]]*/, "", line)
+      if (line !~ /^from all lookup (local|main|default)$/) found=1
+    }
+    END { exit found ? 0 : 1 }
+  '
+}
+
+ipv6_default_uses_ra() {
+  command -v ip >/dev/null 2>&1 || return 1
+  ip -6 route show default 2>/dev/null | grep -qw 'proto ra'
+}
+
+iface_accepts_ra() {
+  local value
+  [[ -n "${DEFAULT_IFACE:-}" ]] || return 1
+  value="$(read_sysctl "net.ipv6.conf.${DEFAULT_IFACE}.accept_ra" 0)"
+  [[ "$value" == "1" || "$value" == "2" ]]
+}
+
+ip_forwarding_enabled_now() {
+  [[ "$(read_sysctl net.ipv4.ip_forward 0)" == "1" ]] && return 0
+  [[ "$(read_sysctl net.ipv6.conf.all.forwarding 0)" == "1" ]]
+}
+
+has_nat_or_tproxy_rules() {
+  if command -v nft >/dev/null 2>&1 && nft list ruleset 2>/dev/null | grep -Eiq '\b(masquerade|dnat|snat|redirect|tproxy)\b'; then
+    return 0
+  fi
+  if command -v iptables-save >/dev/null 2>&1 && iptables-save 2>/dev/null | grep -Eiq '\b(MASQUERADE|DNAT|SNAT|REDIRECT|TPROXY)\b'; then
+    return 0
+  fi
+  if command -v ip6tables-save >/dev/null 2>&1 && ip6tables-save 2>/dev/null | grep -Eiq '\b(MASQUERADE|DNAT|SNAT|REDIRECT|TPROXY)\b'; then
+    return 0
+  fi
+  return 1
+}
+
+has_tunnel_iface() {
+  command -v ip >/dev/null 2>&1 || return 1
+  ip -o link show 2>/dev/null | awk -F': ' '
+    $2 ~ /^(wg|tun|tap|tailscale|zt|nebula|mimic|phantun)/ { found=1 }
+    END { exit found ? 0 : 1 }
+  '
+}
+
+has_public_tcp_listener() {
+  command -v ss >/dev/null 2>&1 || return 1
+  ss -H -ltn 2>/dev/null | awk '
+    function listen_port(addr, parts, n) {
+      gsub(/^\[/, "", addr)
+      gsub(/\]/, "", addr)
+      n=split(addr, parts, ":")
+      return parts[n]
+    }
+    function listen_host(addr, port) {
+      gsub(/^\[/, "", addr)
+      gsub(/\]/, "", addr)
+      return substr(addr, 1, length(addr) - length(port) - 1)
+    }
+    {
+      addr=$4
+      port=listen_port(addr)
+      host=listen_host(addr, port)
+      if (host == "127.0.0.1" || host == "::1" || host == "localhost") next
+      if (port ~ /^[0-9]+$/ && port != 22 && port != 2222 && port != 60022 && port !~ /^601[0-9]$/) {
+        found=1
+        exit
+      }
+    }
+    END { exit found ? 0 : 1 }
+  '
+}
+
+infer_auto_topology() {
+  local v4_defaults v6_defaults policy nat tunnel forwarding listener
+  v4_defaults="$(default_route_count 4)"
+  v6_defaults="$(default_route_count 6)"
+  policy="no"; policy_routing_present && policy="yes"
+  nat="no"; has_nat_or_tproxy_rules && nat="yes"
+  tunnel="no"; has_tunnel_iface && tunnel="yes"
+  forwarding="no"; ip_forwarding_enabled_now && forwarding="yes"
+  listener="no"; has_public_tcp_listener && listener="yes"
+
+  if [[ "$ROLE" == "forwarding" ]]; then
+    STATEFUL="yes"
+    STATEFUL_REASON="角色=转发节点，自动按 NAT/TProxy/状态防火墙预留 conntrack"
+    LANDING_ROUTES="no"
+    LANDING_ROUTES_REASON="角色=转发节点，不使用落地路由开关"
+  else
+    SCENE="landing"
+    if [[ "$forwarding" == "yes" || "$nat" == "yes" || "$tunnel" == "yes" ]]; then
+      LANDING_ROUTES="yes"
+      LANDING_ROUTES_REASON="检测到 forwarding/NAT/TProxy/隧道接口痕迹，落地机同时按路由出口处理"
+      STATEFUL="yes"
+      STATEFUL_REASON="落地路由=是，需要 conntrack/NAT 状态容量"
+    else
+      LANDING_ROUTES="no"
+      LANDING_ROUTES_REASON="未检测到 forwarding/NAT/TProxy/隧道接口，落地机按本机应用出口处理"
+      STATEFUL="no"
+      STATEFUL_REASON="落地路由=否，不主动放大 conntrack"
+    fi
+  fi
+
+  if [[ "$ROLE" == "forwarding" ]]; then
+    case "$SCENE" in
+      front|ix|relay|international)
+        MULTIPATH="yes"
+        MULTIPATH_REASON="场景=$(scene_label)，默认可能存在专线/跨境/非对称回程，关闭 rp_filter"
+        ;;
+      *)
+        if [[ "$policy" == "yes" || "$v4_defaults" -gt 1 || "$v6_defaults" -gt 1 || "$tunnel" == "yes" ]]; then
+          MULTIPATH="yes"
+          MULTIPATH_REASON="检测到多默认路由/策略路由/隧道接口，关闭 rp_filter"
+        else
+          MULTIPATH="no"
+          MULTIPATH_REASON="普通转发且未检测到多出口或策略路由，使用 loose rp_filter"
+        fi
+        ;;
+    esac
+  elif [[ "$LANDING_ROUTES" == "yes" ]]; then
+    MULTIPATH="yes"
+    MULTIPATH_REASON="落地机承担隧道/NAT/路由出口，关闭 rp_filter 避免回程包误丢"
+  elif [[ "$policy" == "yes" || "$v4_defaults" -gt 1 || "$v6_defaults" -gt 1 ]]; then
+    MULTIPATH="yes"
+    MULTIPATH_REASON="检测到多默认路由或策略路由，关闭 rp_filter"
+  else
+    MULTIPATH="no"
+    MULTIPATH_REASON="未检测到多出口/策略路由，使用 loose rp_filter"
+  fi
+
+  if ipv6_default_uses_ra; then
+    IPV6_RA="yes"
+    IPV6_RA_REASON="IPv6 默认路由带 proto ra，说明依赖路由通告"
+  elif iface_accepts_ra && [[ "$v6_defaults" -gt 0 ]]; then
+    IPV6_RA="yes"
+    IPV6_RA_REASON="默认网卡 accept_ra 已开启且存在 IPv6 默认路由"
+  else
+    IPV6_RA="no"
+    IPV6_RA_REASON="未检测到依赖 RA 的 IPv6 默认路由"
+  fi
+
+  if [[ "$ROLE" == "landing" ]]; then
+    LOCAL_TCP_TERMINATION="yes"
+    LOCAL_TCP_TERMINATION_REASON="角色=落地节点，默认本机有 Web/代理/应用层 TCP 服务"
+  elif [[ "$listener" == "yes" ]]; then
+    LOCAL_TCP_TERMINATION="yes"
+    LOCAL_TCP_TERMINATION_REASON="检测到非 SSH 的公开 TCP 监听端口，启用本机 TFO 相关优化"
+  else
+    LOCAL_TCP_TERMINATION="no"
+    LOCAL_TCP_TERMINATION_REASON="纯转发节点未检测到非 SSH 公开 TCP 服务，跳过 TFO"
+  fi
+
+  HANDSHAKE="yes"
+  TFO_GLOBAL="no"
+  BUSY_MODE="auto"
+  CONCURRENCY_MODE="auto"
 }
 
 count_queues() {
@@ -952,13 +1111,13 @@ SCENE="plain"
 TARGET="speed"
 BUSINESS="mixed"
 CONCURRENCY_MODE="auto"
-STATEFUL="yes"
-LANDING_ROUTES="no"
-IPV6_RA="no"
-MULTIPATH="yes"
+STATEFUL="auto"
+LANDING_ROUTES="auto"
+IPV6_RA="auto"
+MULTIPATH="auto"
 HANDSHAKE="yes"
 TFO_GLOBAL="no"
-LOCAL_TCP_TERMINATION="no"
+LOCAL_TCP_TERMINATION="auto"
 BUSY_MODE="auto"
 UP_MBPS=1000
 DOWN_MBPS=1000
@@ -973,12 +1132,18 @@ TCP_CONNS_OVERRIDE=0
 UDP_SESSIONS_OVERRIDE=0
 CPS_OVERRIDE=0
 SERVICE_NAME=""
+STATEFUL_REASON="等待自动推断"
+LANDING_ROUTES_REASON="等待自动推断"
+MULTIPATH_REASON="等待自动推断"
+IPV6_RA_REASON="等待自动推断"
+LOCAL_TCP_TERMINATION_REASON="等待自动推断"
 
 if [[ "$UI_MODE" == "menu" ]] && has_tty; then
   interactive_menu
 else
   linear_wizard
 fi
+infer_auto_topology
 
 if [[ -z "$OUT_DIR" ]]; then
   OUT_DIR="$STATE_DIR/runs/$TS"
@@ -1620,7 +1785,12 @@ IPv6_RA依赖=$IPV6_RA
 CPU核心=$CPU_COUNT
 RX队列=$RX_QUEUES
 TX队列=$TX_QUEUES
+状态规则依据=$STATEFUL_REASON
+落地路由依据=$LANDING_ROUTES_REASON
+多出口_策略路由依据=$MULTIPATH_REASON
+IPv6_RA依据=$IPV6_RA_REASON
 本机终止TCP=$LOCAL_TCP_TERMINATION
+本机终止TCP依据=$LOCAL_TCP_TERMINATION_REASON
 TFO建连优化=$HANDSHAKE
 TFO全局监听=$TFO_GLOBAL
 TFO值=${TFO_VALUE:-已跳过}

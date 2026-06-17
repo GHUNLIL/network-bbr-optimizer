@@ -12,7 +12,9 @@
 
 conntrack 会区分连接上限和 hash 表大小：`nf_conntrack_max` 仍按机器角色、带宽、会话量和内存预算计算，`hashsize` 会按连接上限约 `1/8` 写入。这样可以避免某些内核在 `nf_conntrack` 模块加载时，把运行态连接上限自动膨胀到脚本目标值的数倍。
 
-容量与高级覆盖里可以选择“会话表并发强度”：默认 `auto` 会按场景、带宽和内存自动判断。中高带宽的状态转发前置/IX 机器会自动提升到 `high`，大内存千兆 IX 机器才会升到 `extreme`。`high` 会提高 conntrack、nofile、listen backlog、SYN backlog、TIME_WAIT 和 netdev 队列容量，`extreme` 更激进但仍受内存预算保护。
+会话表并发强度默认自动判断：脚本会按角色、场景、带宽和内存判断 `balanced/high/extreme`。中高带宽的状态转发前置/IX 机器会自动提升到 `high`，大内存千兆 IX 机器才会升到 `extreme`。`high` 会提高 conntrack、nofile、listen backlog、SYN backlog、TIME_WAIT 和 netdev 队列容量，`extreme` 更激进但仍受内存预算保护。
+
+`stateful`、落地路由、多出口/策略路由、IPv6 RA、本机是否终止 TCP 这些容易误选的拓扑项也会自动推断：脚本会结合角色/场景、当前默认路由、策略路由、NAT/TProxy 规则、隧道接口、IPv6 `proto ra` 默认路由和公开 TCP 监听端口判断，并在应用后的报告里列出判断依据。
 
 脚本会在应用配置前尝试加载 `tcp_bbr` 和 `sch_fq` 模块，并写入 `/etc/modules-load.d/99-network-optimize.conf` 让它们开机加载。这样普通 BBR1 内核即使初始只显示 `cubic reno`，只要系统提供 `tcp_bbr` 模块，也会正确切到 `net.ipv4.tcp_congestion_control = bbr`。
 
@@ -69,7 +71,7 @@ bash bbr.sh --help          # 查看帮助
 
 打开脚本时，主界面优先显示“系统已生效参数”，也就是从当前机器实时读取到的内核配置。修改角色/场景或链路参数后，界面才会切换为“待生效配置草案”，避免把脚本默认值误认为系统当前值。
 
-交互界面不再询问“优化目标”“业务类型”“BBR 版本假设”这几个容易误选的分支；脚本固定使用极致满速、`TCP+UDP 双优化` 和 BBR 自动/未知公式。RPS、TFO、busy_poll、会话表并发强度、TCP/UDP/CPS 容量都会在“生成配置并确认是否应用”时按角色、场景、带宽、RTT、内存、CPU 和网卡队列自动判断。
+交互界面不再询问“优化目标”“业务类型”“BBR 版本假设”“stateful”“多出口/策略路由”“IPv6 RA”“落地路由”这些容易误选的分支；脚本固定使用极致满速、`TCP+UDP 双优化` 和 BBR 自动/未知公式。RPS、TFO、busy_poll、会话表并发强度、TCP/UDP/CPS 容量都会在“生成配置并确认是否应用”时按角色、场景、带宽、RTT、内存、CPU、网卡队列和当前路由/防火墙状态自动判断。
 
 界面会保留 `BBR`、`TFO`、`RPS`、`nftables`、`conntrack`、`sysctl`、`busy_poll` 等英文技术术语，但自动项不再单独占主菜单。
 
@@ -77,7 +79,7 @@ bash bbr.sh --help          # 查看帮助
 
 `--wgmimic-required` 是给 WireGuard + Mimic 隧道的一键最小配置：只开启 IPv4/IPv6 转发、关闭 rp_filter、关闭 redirects/source route 等会影响隧道路由的项目，不会改 BBR、队列、RPS 或 conntrack 容量。完整加速仍走普通生成/应用流程。
 
-应用完成后，脚本会打印一段“本次输入、自动选择和生成参数报告”，里面包含你输入的角色/场景/带宽/RTT/丢包抖动、脚本自动判断的 RPS/TFO/busy_poll/会话表强度，以及最终生成的核心参数。可以整段复制给 Codex 检查是否合理。
+应用完成后，脚本会打印一段“本次输入、自动选择和生成参数报告”，里面包含你输入的角色/场景/带宽/RTT/丢包抖动、脚本自动判断的 stateful/落地路由/多出口/IPv6 RA/RPS/TFO/busy_poll/会话表强度和判断依据，以及最终生成的核心参数。可以整段复制给 Codex 检查是否合理。
 
 ## 输出目录
 
@@ -118,7 +120,7 @@ bash bbr.sh --out-dir /root/bbr-output
 - 转发节点：包括前置入口、IX 专线、线路中继、国际互联和普通 nftables 转发。
 - 落地节点：默认指 3x-ui、Xray、GOST 等应用层出口机器。
 - 纯转发节点不会默认开启 TCP Fast Open，因为 nftables 内核转发不终止 TCP 连接，单边开启 TFO 对被转发连接没有实际帮助。
-- 落地节点默认不启用内核转发；只有机器同时承担 NAT、路由或 nftables 转发时才需要开启。
+- 落地节点会自动检测现有 forwarding、NAT/TProxy 规则和隧道接口；只有机器同时承担 NAT、路由或 nftables 转发时才会按路由出口处理。
 - 脚本会在应用实时配置前生成回滚文件。
 - BBR1/未知内核都会尝试启用 `bbr` 拥塞控制；`BBR3` 选项只影响计算倍数和 ECN 策略，不代表只有 BBR3 才能启用 BBR。
 
