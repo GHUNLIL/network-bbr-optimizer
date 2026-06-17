@@ -32,7 +32,7 @@ TMP_BBR=/tmp/network-bbr-optimizer.sh; curl -fsSL https://raw.githubusercontent.
 TMP_BBR=/tmp/network-bbr-optimizer.sh; curl -fsSL https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bbr.sh -o "$TMP_BBR" && bash "$TMP_BBR" --dry-run
 ```
 
-使用逐项问答模式：
+使用精简问答模式：
 
 ```bash
 TMP_BBR=/tmp/network-bbr-optimizer.sh; curl -fsSL https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bbr.sh -o "$TMP_BBR" && sudo bash "$TMP_BBR" --quick
@@ -56,7 +56,7 @@ sudo ./bbr.sh
 
 ```bash
 bash bbr.sh                 # 上下键可视化菜单
-bash bbr.sh --quick         # 逐项问答模式
+bash bbr.sh --quick         # 精简问答模式，只问角色/场景和链路参数
 bash bbr.sh --dry-run       # 只生成配置，不应用
 bash bbr.sh --apply         # 生成配置，并询问是否应用
 bash bbr.sh --wgmimic-required # 只应用 WG/Mimic 必需 sysctl
@@ -67,15 +67,15 @@ bash bbr.sh --help          # 查看帮助
 
 ## 菜单变化
 
-打开脚本时，主界面优先显示“系统已生效参数”，也就是从当前机器实时读取到的内核配置。修改 1-5 项之后，界面才会切换为“待生效配置草案”，避免把脚本默认值误认为系统当前值。
+打开脚本时，主界面优先显示“系统已生效参数”，也就是从当前机器实时读取到的内核配置。修改角色/场景或链路参数后，界面才会切换为“待生效配置草案”，避免把脚本默认值误认为系统当前值。
 
-交互界面不再询问“优化目标”“业务类型”“BBR 版本假设”这几个容易误选的分支；脚本固定使用极致满速、`TCP+UDP 双优化` 和 BBR 自动/未知公式。需要调整强度时，使用带宽、RTT、丢包、抖动和高级覆盖项。
+交互界面不再询问“优化目标”“业务类型”“BBR 版本假设”这几个容易误选的分支；脚本固定使用极致满速、`TCP+UDP 双优化` 和 BBR 自动/未知公式。RPS、TFO、busy_poll、会话表并发强度、TCP/UDP/CPS 容量都会在“生成配置并确认是否应用”时按角色、场景、带宽、RTT、内存、CPU 和网卡队列自动判断。
 
-界面会保留 `BBR`、`TFO`、`RPS`、`nftables`、`conntrack`、`sysctl`、`busy_poll` 等英文技术术语，并在菜单选项和问题标题里附中文备注。例如 `NIC/RPS/busy_poll - 网卡队列、收包分流、低延迟轮询`。
+界面会保留 `BBR`、`TFO`、`RPS`、`nftables`、`conntrack`、`sysctl`、`busy_poll` 等英文技术术语，但自动项不再单独占主菜单。
 
 如果没有修改任何参数就选择“生成配置”，脚本会先确认是否仍然使用默认草案生成。
 
-菜单里的 `WG/Mimic sysctl - 隧道必需内核参数` 是给 WireGuard + Mimic 隧道的一键最小配置：只开启 IPv4/IPv6 转发、关闭 rp_filter、关闭 redirects/source route 等会影响隧道路由的项目，不会改 BBR、队列、RPS 或 conntrack 容量。完整加速仍走普通生成/应用流程。
+`--wgmimic-required` 是给 WireGuard + Mimic 隧道的一键最小配置：只开启 IPv4/IPv6 转发、关闭 rp_filter、关闭 redirects/source route 等会影响隧道路由的项目，不会改 BBR、队列、RPS 或 conntrack 容量。完整加速仍走普通生成/应用流程。
 
 ## 输出目录
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.17.1"
+VERSION="2026.06.17.2"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -248,14 +248,12 @@ show_summary() {
   printf '  带宽 Mbps      : 上行 %s / 下行 %s\n' "$UP_MBPS" "$DOWN_MBPS"
   printf '  RTT ms         : 上游 %s / 下游 %s\n' "$UP_RTT" "$DOWN_RTT"
   printf '  丢包/抖动      : %s%% / %sms\n' "$LOSS_PCT" "$JITTER_MS"
-  printf '  网卡/队列      : %s / RX %s / TX %s / CPU %s\n' "$DEFAULT_IFACE" "$RX_QUEUES" "$TX_QUEUES" "$CPU_COUNT"
+  printf '  自动检测        : 网卡 %s / RX %s / TX %s / CPU %s\n' "$DEFAULT_IFACE" "$RX_QUEUES" "$TX_QUEUES" "$CPU_COUNT"
   printf '  转发状态       : 状态规则=%s, 落地路由=%s, 多出口/策略路由=%s, IPv6 RA=%s\n' \
     "$(yn_label "$STATEFUL")" "$(yn_label "$LANDING_ROUTES")" "$(yn_label "$MULTIPATH")" "$(yn_label "$IPV6_RA")"
-  printf '  握手优化       : TFO=%s, 本机终止 TCP=%s, 全局监听 TFO=%s, busy_poll=%s\n' \
+  printf '  自动策略        : TFO=%s, 本机终止 TCP=%s, 全局监听 TFO=%s, busy_poll=%s\n' \
     "$(yn_label "$HANDSHAKE")" "$(yn_label "$LOCAL_TCP_TERMINATION")" "$(yn_label "$TFO_GLOBAL")" "$(choice_short_label "$BUSY_MODE")"
-  printf '  手动覆盖       : TCP上限=%sMB, BDP倍数=%s, TCP并发=%s, UDP会话=%s, CPS=%s\n' \
-    "$MANUAL_TCP_CAP_MB" "$MANUAL_BDP_MULT" "$TCP_CONNS_OVERRIDE" "$UDP_SESSIONS_OVERRIDE" "$CPS_OVERRIDE"
-  printf '  会话表强度     : %s\n' "$(choice_short_label "$CONCURRENCY_MODE")"
+  printf '  自动容量        : 会话表强度=%s, TCP/UDP/CPS/BDP 覆盖均为自动\n' "$(choice_short_label "$CONCURRENCY_MODE")"
   if [[ -n "$SERVICE_NAME" ]]; then
     printf '  服务 nofile    : %s\n' "$SERVICE_NAME"
   fi
@@ -274,7 +272,7 @@ print_live_sysctl() {
 
 show_live_status_body() {
   printf '%s系统已生效参数%s\n' "$BOLD" "$RESET"
-  printf '  说明            : 以下为从当前系统实时读取的值；修改 1-5 项后，主界面会切换为待生效配置草案。\n'
+  printf '  说明            : 以下为从当前系统实时读取的值；修改 1-2 项后，主界面会切换为待生效配置草案。\n'
   printf '  默认网卡        : %s / RX %s / TX %s / CPU %s\n\n' "$DEFAULT_IFACE" "$RX_QUEUES" "$TX_QUEUES" "$CPU_COUNT"
   print_live_sysctl net.ipv4.tcp_congestion_control
   print_live_sysctl net.core.default_qdisc
@@ -385,50 +383,13 @@ edit_link() {
   IPV6_RA=$(ask_yes_no "IPv6 RA 默认路由是否依赖路由通告" "$IPV6_RA")
 }
 
-edit_runtime() {
-  banner
-  printf '%sNIC / RPS / busy_poll 网卡与运行时%s\n' "$BOLD" "$RESET"
-  CPU_COUNT=$(to_int "$(ask "CPU cores CPU 核数" "$CPU_COUNT")")
-  DEFAULT_IFACE=$(ask "NIC interface 主网卡名称" "$DEFAULT_IFACE")
-  RX_QUEUES=$(to_int "$(ask "RX queues 收包队列数" "$RX_QUEUES")")
-  TX_QUEUES=$(to_int "$(ask "TX queues 发包队列数" "$TX_QUEUES")")
-  BUSY_MODE=$(ask_choice "busy_poll mode 低延迟轮询模式" "$BUSY_MODE" auto force off)
-}
-
-edit_handshake() {
-  banner
-  printf '%sTFO / handshake / mux 握手与应用层选项%s\n' "$BOLD" "$RESET"
-  HANDSHAKE=$(ask_yes_no "TFO/TCP Fast Open 是否启用建连优化" "$HANDSHAKE")
-  LOCAL_TCP_TERMINATION=$(ask_yes_no "local TCP termination 本机是否终止 TCP" "$LOCAL_TCP_TERMINATION")
-  TFO_GLOBAL=$(ask_yes_no "global listener TFO 1024 是否启用全局监听 TFO 位" "$TFO_GLOBAL")
-  printf '\n应用层 mux/smux/yamux/multiplex 默认不启用，本脚本不会写 mux 配置。\n'
-  pause_ui
-}
-
-edit_capacity() {
-  banner
-  printf '%scapacity / override 容量与高级覆盖%s\n' "$BOLD" "$RESET"
-  CONCURRENCY_MODE=$(ask_choice "session concurrency mode 会话表并发强度" "$CONCURRENCY_MODE" auto balanced high extreme)
-  TCP_CONNS_OVERRIDE=$(to_int "$(ask "TCP connections override TCP 并发覆盖，0=自动" "$TCP_CONNS_OVERRIDE")")
-  UDP_SESSIONS_OVERRIDE=$(to_int "$(ask "UDP sessions override UDP 会话覆盖，0=自动" "$UDP_SESSIONS_OVERRIDE")")
-  CPS_OVERRIDE=$(to_int "$(ask "CPS override 每秒新建连接覆盖，0=自动" "$CPS_OVERRIDE")")
-  MANUAL_TCP_CAP_MB=$(to_int "$(ask "tcp_max cap MB 单连接 TCP 上限，0=自动" "$MANUAL_TCP_CAP_MB")")
-  MANUAL_BDP_MULT=$(to_int "$(ask "BDP multiplier override BDP 倍数覆盖，0=自动" "$MANUAL_BDP_MULT")")
-  BBR_KIND="unknown"
-  SERVICE_NAME=$(ask "systemd service name 可选服务名，用于 LimitNOFILE drop-in，空=跳过" "$SERVICE_NAME")
-}
-
 interactive_menu() {
-  local choice key cursor=0 count=9 i answer
+  local choice key cursor=0 count=5 i answer
   local options=(
     "role/scene - 角色、转发场景"
     "bandwidth/RTT/loss - 链路带宽、延迟、丢包抖动"
-    "NIC/RPS/busy_poll - 网卡队列、收包分流、低延迟轮询"
-    "TFO/handshake/mux - TCP Fast Open、握手优化、mux 说明"
-    "capacity/override - 并发容量、高级覆盖"
     "generate/apply - 生成配置并确认是否应用"
     "live sysctl - 查看系统已生效参数"
-    "WG/Mimic sysctl - 隧道必需内核参数"
     "exit - 退出"
   )
   tput civis 2>/dev/null || true
@@ -440,7 +401,7 @@ interactive_menu() {
       show_live_status_body
     fi
     hr
-    printf '%s↑/↓ 或 j/k 选择，Enter 确认；也可按 1-9，q 退出%s\n\n' "$DIM" "$RESET"
+    printf '%s↑/↓ 或 j/k 选择，Enter 确认；也可按 1-5，q 退出%s\n\n' "$DIM" "$RESET"
     for ((i=0; i<count; i++)); do
       if (( i == cursor )); then
         printf '  %s> %d) %s%s\n' "$GREEN" $((i + 1)) "${options[$i]}" "$RESET"
@@ -455,53 +416,50 @@ interactive_menu() {
         $'\e[A'|$'\eOA'|k|K) cursor=$(((cursor + count - 1) % count)); continue ;;
         $'\e[B'|$'\eOB'|j|J) cursor=$(((cursor + 1) % count)); continue ;;
         ""|$'\r'|$'\n') choice=$((cursor + 1)) ;;
-        [1-9]) choice="$key"; cursor=$((choice - 1)) ;;
+        [1-5]) choice="$key"; cursor=$((choice - 1)) ;;
         q|Q) exit 0 ;;
         *) continue ;;
       esac
     else
-      prompt_read choice "请选择 [6]: " || true
-      choice="${choice:-6}"
+      prompt_read choice "请选择 [3]: " || true
+      choice="${choice:-3}"
     fi
 
     case "$choice" in
       1) edit_role_scene; DRAFT_DIRTY="yes" ;;
       2) edit_link; DRAFT_DIRTY="yes" ;;
-      3) edit_runtime; DRAFT_DIRTY="yes" ;;
-      4) edit_handshake; DRAFT_DIRTY="yes" ;;
-      5) edit_capacity; DRAFT_DIRTY="yes" ;;
-      6)
+      3)
         if [[ "$DRAFT_DIRTY" == "yes" ]]; then
           break
         fi
         banner
         printf '当前主界面显示的是系统已生效参数，还没有待生效配置草案。\n'
-        printf '建议先修改 1-5 项，再生成配置。\n\n'
+        printf '建议先修改 1-2 项；网卡/RPS/TFO/busy_poll/会话表会在生成时自动判断。\n\n'
         answer=$(ask_yes_no "仍然使用脚本默认草案生成配置" "no")
         if [[ "$answer" == "yes" ]]; then
           DRAFT_DIRTY="yes"
           break
         fi
         ;;
-      7) show_live_status ;;
-      8) apply_wgmimic_required_sysctl; pause_ui ;;
-      9|q|Q) exit 0 ;;
+      4) show_live_status ;;
+      5|q|Q) exit 0 ;;
       *) warn "无效选择"; pause_ui ;;
     esac
   done
 }
 
 linear_wizard() {
-  local tcp_default
   ROLE=$(ask_choice "role 机器角色" "$ROLE" forwarding landing)
   if [[ "$ROLE" == "forwarding" ]]; then
     SCENE=$(ask_choice "scene 转发场景" "$SCENE" front ix relay international plain)
     STATEFUL=$(ask_yes_no "stateful nftables 是否 NAT/TProxy/状态规则" "$STATEFUL")
     LANDING_ROUTES="no"
+    LOCAL_TCP_TERMINATION="no"
   else
     SCENE="landing"
     LANDING_ROUTES=$(ask_yes_no "landing routes 落地机是否同时做 NAT/路由" "$LANDING_ROUTES")
     [[ "$LANDING_ROUTES" == "yes" ]] && STATEFUL="yes" || STATEFUL="no"
+    LOCAL_TCP_TERMINATION="yes"
   fi
 
   TARGET="speed"
@@ -514,31 +472,19 @@ linear_wizard() {
   LOSS_PCT=$(ask "loss percentage 丢包率百分比，例如 0 或 0.3" "$LOSS_PCT")
   JITTER_MS=$(to_int "$(ask "jitter ms 抖动" "$JITTER_MS")")
 
-  CPU_COUNT=$(to_int "$(ask "CPU cores CPU 核数" "$CPU_COUNT")")
-  DEFAULT_IFACE=$(ask "NIC interface 主网卡名称，用于 txqueuelen/RPS" "$DEFAULT_IFACE")
-  RX_QUEUES=$(to_int "$(ask "RX queues 收包队列数" "$RX_QUEUES")")
-  TX_QUEUES=$(to_int "$(ask "TX queues 发包队列数" "$TX_QUEUES")")
-
   MULTIPATH=$(ask_yes_no "multipath/policy routing 是否多出口/策略路由/非对称回程" "$MULTIPATH")
   IPV6_RA=$(ask_yes_no "IPv6 RA 默认路由是否依赖路由通告" "$IPV6_RA")
-  HANDSHAKE=$(ask_yes_no "TFO/TCP Fast Open 是否启用建连优化" "$HANDSHAKE")
-  if [[ "$ROLE" == "landing" ]]; then
-    tcp_default="$LOCAL_TCP_TERMINATION"
-    [[ "$tcp_default" == "no" || "$tcp_default" == "auto" ]] && tcp_default="yes"
-    LOCAL_TCP_TERMINATION=$(ask_yes_no "local TCP termination 落地机是否本机终止 TCP，例如 Xray/GOST/Web/代理监听服务" "$tcp_default")
-  else
-    LOCAL_TCP_TERMINATION=$(ask_yes_no "local TCP termination 本机是否也终止 TCP，例如代理/Web 监听服务" "$LOCAL_TCP_TERMINATION")
-  fi
-  TFO_GLOBAL=$(ask_yes_no "global listener TFO 1024 是否启用全局监听 TFO 位，通常选否" "$TFO_GLOBAL")
-  BUSY_MODE=$(ask_choice "busy_poll mode 低延迟轮询模式" "$BUSY_MODE" auto force off)
-  CONCURRENCY_MODE=$(ask_choice "session concurrency mode 会话表并发强度" "$CONCURRENCY_MODE" auto balanced high extreme)
-  MANUAL_TCP_CAP_MB=$(to_int "$(ask "tcp_max cap MB 单连接 TCP 上限，0=自动" "$MANUAL_TCP_CAP_MB")")
-  MANUAL_BDP_MULT=$(to_int "$(ask "BDP multiplier override BDP 倍数覆盖，0=自动" "$MANUAL_BDP_MULT")")
+  HANDSHAKE="yes"
+  TFO_GLOBAL="no"
+  BUSY_MODE="auto"
+  CONCURRENCY_MODE="auto"
+  MANUAL_TCP_CAP_MB=0
+  MANUAL_BDP_MULT=0
   BBR_KIND="unknown"
-  TCP_CONNS_OVERRIDE=$(to_int "$(ask "TCP connections override TCP 并发覆盖，0=自动" "$TCP_CONNS_OVERRIDE")")
-  UDP_SESSIONS_OVERRIDE=$(to_int "$(ask "UDP sessions override UDP 会话覆盖，0=自动" "$UDP_SESSIONS_OVERRIDE")")
-  CPS_OVERRIDE=$(to_int "$(ask "CPS override 每秒新建连接覆盖，0=自动" "$CPS_OVERRIDE")")
-  SERVICE_NAME=$(ask "systemd service name 可选服务名，用于 LimitNOFILE drop-in，空=跳过" "$SERVICE_NAME")
+  TCP_CONNS_OVERRIDE=0
+  UDP_SESSIONS_OVERRIDE=0
+  CPS_OVERRIDE=0
+  SERVICE_NAME=""
 }
 
 usage() {
@@ -550,7 +496,7 @@ Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
 
 用法:
   bash bbr.sh             # 上下键可视化菜单，先生成配置，再确认是否应用
-  bash bbr.sh --quick     # 线性问答模式
+  bash bbr.sh --quick     # 精简问答模式，只问角色/场景和链路参数
   bash bbr.sh --dry-run   # 只生成配置文件，不应用
   bash bbr.sh --apply     # 生成后默认询问应用
   bash bbr.sh --wgmimic-required  # 只生成/应用 WG/Mimic 必需 sysctl
@@ -567,7 +513,7 @@ Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
   不再在 /root 下面刷出一堆 network-optimize-backup-*。
 
 默认不启用应用层 mux/multiplex。
-界面保留 BBR/TFO/RPS/nftables/conntrack/sysctl 等英文术语，并在菜单选项内附中文备注。
+界面保留 BBR/TFO/RPS/nftables/conntrack/sysctl 等英文术语；自动项不再单独占主菜单。
 
 术语说明:
   BBR/BBR3: Linux TCP 拥塞控制算法名。
