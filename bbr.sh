@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.05.28.8"
+VERSION="2026.06.17.1"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -33,6 +33,7 @@ OUT_DIR=""
 OUT_DIR_AUTO="no"
 CLEAN_OUTPUTS="no"
 DRAFT_DIRTY="no"
+WGMIMIC_REQUIRED_ONLY="no"
 
 log() { printf '[*] %s\n' "$*"; }
 warn() { printf '[!] %s\n' "$*" >&2; }
@@ -427,7 +428,7 @@ interactive_menu() {
     "capacity/override - 并发容量、高级覆盖"
     "generate/apply - 生成配置并确认是否应用"
     "live sysctl - 查看系统已生效参数"
-    "clean outputs - 清理旧输出目录"
+    "WG/Mimic sysctl - 隧道必需内核参数"
     "exit - 退出"
   )
   tput civis 2>/dev/null || true
@@ -483,7 +484,7 @@ interactive_menu() {
         fi
         ;;
       7) show_live_status ;;
-      8) clean_legacy_outputs ;;
+      8) apply_wgmimic_required_sysctl; pause_ui ;;
       9|q|Q) exit 0 ;;
       *) warn "无效选择"; pause_ui ;;
     esac
@@ -552,6 +553,7 @@ Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
   bash bbr.sh --quick     # 线性问答模式
   bash bbr.sh --dry-run   # 只生成配置文件，不应用
   bash bbr.sh --apply     # 生成后默认询问应用
+  bash bbr.sh --wgmimic-required  # 只生成/应用 WG/Mimic 必需 sysctl
   bash bbr.sh --out-dir DIR       # 指定输出目录
   bash bbr.sh --clean-outputs     # 清理旧版 bbr-output-* 和 /root/network-optimize-backup-* 目录
   bash bbr.sh --help
@@ -582,6 +584,7 @@ while [[ $# -gt 0 ]]; do
     --quick) UI_MODE="wizard" ;;
     --dry-run) APPLY_MODE="no" ;;
     --apply) APPLY_MODE="yes" ;;
+    --wgmimic-required|--wgmimic-sysctl|--wg-mimic-sysctl) WGMIMIC_REQUIRED_ONLY="yes" ;;
     --out-dir)
       shift
       [[ $# -gt 0 ]] || die "--out-dir 需要指定输出目录"
@@ -887,6 +890,93 @@ EOF
   chmod +x "$rollback"
 }
 
+emit_wgmimic_required_sysctl() {
+  local file="$1" key="$2" value="$3"
+  if sysctl_exists "$key"; then
+    printf '%s = %s\n' "$key" "$value" >> "$file"
+  else
+    printf '# 已跳过，当前内核缺少该参数: %s = %s\n' "$key" "$value" >> "$file"
+  fi
+}
+
+write_wgmimic_required_sysctl_file() {
+  local file="$1"
+  : > "$file"
+  {
+    printf '# 由 bbr.sh %s 生成，时间: %s\n' "$VERSION" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf '# WG/Mimic 必需 sysctl：只保证隧道路由/转发工作，不调整 BBR、RPS、队列、conntrack 容量。\n\n'
+  } >> "$file"
+
+  emit_wgmimic_required_sysctl "$file" net.ipv4.ip_forward 1
+  emit_wgmimic_required_sysctl "$file" net.ipv6.conf.all.forwarding 1
+  emit_wgmimic_required_sysctl "$file" net.ipv6.conf.default.forwarding 1
+  emit_wgmimic_required_sysctl "$file" net.ipv4.conf.all.rp_filter 0
+  emit_wgmimic_required_sysctl "$file" net.ipv4.conf.default.rp_filter 0
+  emit_wgmimic_required_sysctl "$file" net.ipv4.conf.all.accept_source_route 0
+  emit_wgmimic_required_sysctl "$file" net.ipv4.conf.default.accept_source_route 0
+  emit_wgmimic_required_sysctl "$file" net.ipv4.conf.all.send_redirects 0
+  emit_wgmimic_required_sysctl "$file" net.ipv4.conf.default.send_redirects 0
+  emit_wgmimic_required_sysctl "$file" net.ipv4.conf.all.accept_redirects 0
+  emit_wgmimic_required_sysctl "$file" net.ipv4.conf.default.accept_redirects 0
+  emit_wgmimic_required_sysctl "$file" net.ipv6.conf.all.accept_redirects 0
+  emit_wgmimic_required_sysctl "$file" net.ipv6.conf.default.accept_redirects 0
+  emit_wgmimic_required_sysctl "$file" net.ipv6.conf.all.accept_source_route 0
+  emit_wgmimic_required_sysctl "$file" net.ipv6.conf.default.accept_source_route 0
+}
+
+apply_wgmimic_required_sysctl() {
+  local out_dir sysctl_out backup_dir do_apply
+  need_linux
+  if [[ -z "${STATE_DIR:-}" ]]; then
+    STATE_DIR="$(default_state_dir)"
+  fi
+  if [[ -z "${TS:-}" ]]; then
+    TS="$(date +%Y%m%d-%H%M%S)"
+  fi
+  if [[ -n "${OUT_DIR:-}" ]]; then
+    out_dir="$OUT_DIR"
+  else
+    out_dir="$STATE_DIR/runs/${TS}-wgmimic-required"
+  fi
+  mkdir -p "$out_dir" "$STATE_DIR" 2>/dev/null || true
+  ln -sfn "$out_dir" "$STATE_DIR/latest" 2>/dev/null || true
+  sysctl_out="$out_dir/98-wgmimic-required.conf"
+  write_wgmimic_required_sysctl_file "$sysctl_out"
+
+  printf '\n已生成 WG/Mimic 必需 sysctl：%s\n' "$sysctl_out"
+  sed -n '1,120p' "$sysctl_out"
+
+  if [[ "$APPLY_MODE" == "no" ]]; then
+    log "dry-run 模式：未应用。"
+    return 0
+  fi
+  if ! is_root; then
+    warn "当前不是 root，只生成配置文件；如需应用请使用 sudo 重新运行。"
+    return 0
+  fi
+
+  if [[ "$APPLY_MODE" == "yes" ]]; then
+    do_apply="yes"
+  else
+    do_apply=$(ask_yes_no "现在应用 WG/Mimic 必需 sysctl 吗" "yes")
+  fi
+  [[ "$do_apply" == "yes" ]] || { log "未应用配置。"; return 0; }
+
+  backup_dir="$STATE_DIR/backups/${TS}-wgmimic-required"
+  mkdir -p "$backup_dir"
+  ln -sfn "$backup_dir" "$STATE_DIR/latest-backup" 2>/dev/null || true
+  install_file "$sysctl_out" /etc/sysctl.d/98-wgmimic-required.conf 0644 "$backup_dir"
+  sysctl --system
+  apply_generated_sysctl_live "$sysctl_out"
+
+  printf '\nWG/Mimic 必需 sysctl 已应用。关键状态：\n'
+  print_live_sysctl net.ipv4.ip_forward
+  print_live_sysctl net.ipv6.conf.all.forwarding
+  print_live_sysctl net.ipv4.conf.all.rp_filter
+  print_live_sysctl net.ipv4.conf.default.rp_filter
+  printf '备份目录: %s\n' "$backup_dir"
+}
+
 need_linux
 
 TS="$(date +%Y%m%d-%H%M%S)"
@@ -896,6 +986,11 @@ if [[ "$CLEAN_OUTPUTS" == "yes" ]]; then
 fi
 
 STATE_DIR="$(default_state_dir)"
+
+if [[ "$WGMIMIC_REQUIRED_ONLY" == "yes" ]]; then
+  apply_wgmimic_required_sysctl
+  exit 0
+fi
 
 MEM_TOTAL_KB=$(mem_kb MemTotal)
 MEM_AVAIL_KB=$(mem_kb MemAvailable)

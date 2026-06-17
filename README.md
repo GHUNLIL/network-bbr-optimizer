@@ -21,7 +21,7 @@ conntrack 会区分连接上限和 hash 表大小：`nf_conntrack_max` 仍按机
 推荐使用下面这个命令进入上下键可视化菜单：
 
 ```bash
-TMP_BBR=/tmp/network-bbr-optimizer.sh; curl -fsSL -H 'Cache-Control: no-cache' "https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bbr.sh?$(date +%s)" -o "$TMP_BBR" && sudo bash "$TMP_BBR"
+TMP_BBR=/tmp/network-bbr-optimizer.sh; curl -fsSL https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bbr.sh -o "$TMP_BBR" && sudo bash "$TMP_BBR"
 ```
 
 这个命令会先把脚本下载到临时文件，再用 `bash` 执行，适合交互式菜单。不要用 `curl ... | bash` 运行交互菜单，因为管道可能占用标准输入，导致上下键菜单显示不完整或无法选择。
@@ -29,13 +29,19 @@ TMP_BBR=/tmp/network-bbr-optimizer.sh; curl -fsSL -H 'Cache-Control: no-cache' "
 只生成配置、不应用到系统：
 
 ```bash
-TMP_BBR=/tmp/network-bbr-optimizer.sh; curl -fsSL -H 'Cache-Control: no-cache' "https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bbr.sh?$(date +%s)" -o "$TMP_BBR" && bash "$TMP_BBR" --dry-run
+TMP_BBR=/tmp/network-bbr-optimizer.sh; curl -fsSL https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bbr.sh -o "$TMP_BBR" && bash "$TMP_BBR" --dry-run
 ```
 
 使用逐项问答模式：
 
 ```bash
-TMP_BBR=/tmp/network-bbr-optimizer.sh; curl -fsSL -H 'Cache-Control: no-cache' "https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bbr.sh?$(date +%s)" -o "$TMP_BBR" && sudo bash "$TMP_BBR" --quick
+TMP_BBR=/tmp/network-bbr-optimizer.sh; curl -fsSL https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bbr.sh -o "$TMP_BBR" && sudo bash "$TMP_BBR" --quick
+```
+
+只应用 WireGuard/Mimic 隧道必需的 sysctl，不做 BBR、RPS、队列、conntrack 大优化：
+
+```bash
+TMP_BBR=/tmp/network-bbr-optimizer.sh; curl -fsSL https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bbr.sh -o "$TMP_BBR" && sudo bash "$TMP_BBR" --wgmimic-required
 ```
 
 ## 保存后运行
@@ -53,6 +59,7 @@ bash bbr.sh                 # 上下键可视化菜单
 bash bbr.sh --quick         # 逐项问答模式
 bash bbr.sh --dry-run       # 只生成配置，不应用
 bash bbr.sh --apply         # 生成配置，并询问是否应用
+bash bbr.sh --wgmimic-required # 只应用 WG/Mimic 必需 sysctl
 bash bbr.sh --out-dir DIR   # 指定输出目录
 bash bbr.sh --clean-outputs # 清理旧版 bbr-output-* 和 /root/network-optimize-backup-* 目录
 bash bbr.sh --help          # 查看帮助
@@ -67,6 +74,8 @@ bash bbr.sh --help          # 查看帮助
 界面会保留 `BBR`、`TFO`、`RPS`、`nftables`、`conntrack`、`sysctl`、`busy_poll` 等英文技术术语，并在菜单选项和问题标题里附中文备注。例如 `NIC/RPS/busy_poll - 网卡队列、收包分流、低延迟轮询`。
 
 如果没有修改任何参数就选择“生成配置”，脚本会先确认是否仍然使用默认草案生成。
+
+菜单里的 `WG/Mimic sysctl - 隧道必需内核参数` 是给 WireGuard + Mimic 隧道的一键最小配置：只开启 IPv4/IPv6 转发、关闭 rp_filter、关闭 redirects/source route 等会影响隧道路由的项目，不会改 BBR、队列、RPS 或 conntrack 容量。完整加速仍走普通生成/应用流程。
 
 ## 输出目录
 
