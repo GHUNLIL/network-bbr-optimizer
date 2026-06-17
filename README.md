@@ -77,6 +77,8 @@ bash bbr.sh --help          # 查看帮助
 
 `--wgmimic-required` 是给 WireGuard + Mimic 隧道的一键最小配置：只开启 IPv4/IPv6 转发、关闭 rp_filter、关闭 redirects/source route 等会影响隧道路由的项目，不会改 BBR、队列、RPS 或 conntrack 容量。完整加速仍走普通生成/应用流程。
 
+应用完成后，脚本会打印一段“本次输入、自动选择和生成参数报告”，里面包含你输入的角色/场景/带宽/RTT/丢包抖动、脚本自动判断的 RPS/TFO/busy_poll/会话表强度，以及最终生成的核心参数。可以整段复制给 Codex 检查是否合理。
+
 ## 输出目录
 
 新版默认不会继续在当前目录生成一堆 `bbr-output-*` 文件夹。

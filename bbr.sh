@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.17.2"
+VERSION="2026.06.17.3"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -1596,31 +1596,56 @@ fi
 cat > "$REPORT_OUT" <<EOF
 中文 BBR 网络优化器报告
 ======================
+生成时间_UTC=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+脚本版本=$VERSION
+
+[输入和选择]
 角色=$(role_label)
 场景=$(scene_label)
-目标=$(target_label)
-业务=$(business_label)
-主网卡=$DEFAULT_IFACE
 上行_Mbps=$UP_MBPS
 下行_Mbps=$DOWN_MBPS
 上游_RTT_ms=$UP_RTT
 下游_RTT_ms=$DOWN_RTT
 丢包率_pct=$LOSS_PCT
 抖动_ms=$JITTER_MS
-队列抖动保护=$QUEUE_JITTER_GUARD
+状态规则=$STATEFUL
+落地路由=$LANDING_ROUTES
+多出口_策略路由=$MULTIPATH
+IPv6_RA依赖=$IPV6_RA
+目标=$(target_label)
+业务=$(business_label)
 
+[自动检测和自动选择]
+主网卡=$DEFAULT_IFACE
+CPU核心=$CPU_COUNT
+RX队列=$RX_QUEUES
+TX队列=$TX_QUEUES
+本机终止TCP=$LOCAL_TCP_TERMINATION
+TFO建连优化=$HANDSHAKE
+TFO全局监听=$TFO_GLOBAL
+TFO值=${TFO_VALUE:-已跳过}
+TFO黑洞检测=${TFO_BLACKHOLE:-已跳过}
+busy_poll=$BUSY_POLL
+RPS启用=$RPS_ENABLE
+RPS_CPU掩码=$RPS_CPUS
+RPS单队列流表=$RPS_FLOW_CNT
+会话表并发强度_输入=$(choice_short_label "$CONCURRENCY_MODE")
+会话表实际强度=$(choice_short_label "$CONCURRENCY_EFFECTIVE")
+队列抖动保护=$QUEUE_JITTER_GUARD
+低带宽初始窗口保护=$LOW_BANDWIDTH_INIT_GUARD
+需要conntrack=$CT_NEEDED
+模块开机加载=tcp_bbr, sch_fq
+
+[生成的核心参数]
 TCP并发=$TCP_CONNS
 UDP会话=$UDP_SESSIONS
 每秒新建连接=$CPS
-会话表并发强度=$(choice_short_label "$CONCURRENCY_MODE")
-会话表实际强度=$(choice_short_label "$CONCURRENCY_EFFECTIVE")
 内存预算_pct=$MEM_PCT
 BDP_bytes=$BDP
 BDP倍数=$BDP_MULT
 TCP缓冲上限=$TCP_MAX
 socket默认缓冲=$SOCK_DEFAULT
 tcp_limit_output_bytes=$TCP_LIMIT
-低带宽初始窗口保护=$LOW_BANDWIDTH_INIT_GUARD
 initcwnd=$INITCWND
 initrwnd=$INITRWND
 nofile=$NOFILE
@@ -1628,18 +1653,24 @@ TIME_WAIT上限=$TW_BUCKETS
 fin_timeout=$FIN_TIMEOUT
 netdev_max_backlog=$NETDEV_BACKLOG
 txqueuelen=$TXQUEUELEN
-RPS启用=$RPS_ENABLE
-RPS_CPU掩码=$RPS_CPUS
-RPS单队列流表=$RPS_FLOW_CNT
-TFO值=${TFO_VALUE:-已跳过}
-TFO黑洞检测=${TFO_BLACKHOLE:-已跳过}
-需要conntrack=$CT_NEEDED
 nf_conntrack_max=$NF_CONNTRACK_MAX
 nf_conntrack_hashsize=$NF_CONNTRACK_BUCKETS
 不需要conntrack时的安全回落上限=$NF_CONNTRACK_RESET_MAX
-模块开机加载=tcp_bbr, sch_fq
 
-应用层 mux/multiplex：本脚本不会开启。
+[生成文件]
+sysctl=$SYSCTL_OUT
+limits=$LIMITS_OUT
+systemd=$SYSTEMD_OUT
+route=$ROUTE_OUT
+nic=$NIC_OUT
+modprobe=$MODPROBE_OUT
+modules_load=$MODULES_LOAD_OUT
+report=$REPORT_OUT
+rollback_apply后生成=$OUT_DIR/rollback.sh
+
+[说明]
+应用层_mux_multiplex=不会开启
+复制这份报告给 Codex，可检查输入、自动选择和生成参数是否合理。
 EOF
 
 printf '\n已生成文件:\n'
@@ -1735,6 +1766,12 @@ systemctl daemon-reexec 2>/dev/null || true
 systemctl daemon-reload 2>/dev/null || true
 systemctl enable --now network-optimize-route.service 2>/dev/null || true
 systemctl enable --now network-optimize-nic.service 2>/dev/null || true
+
+printf '\n本次输入、自动选择和生成参数报告（可整段复制给 Codex 检查）：\n'
+printf '%s\n' '------------------------------------------------------------'
+sed -n '1,220p' "$REPORT_OUT"
+printf '%s\n' '------------------------------------------------------------'
+
 print_final_sysctl_status
 
 printf '\n已应用配置。回滚脚本: %s/rollback.sh\n' "$OUT_DIR"
