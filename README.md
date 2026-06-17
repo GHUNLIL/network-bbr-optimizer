@@ -2,13 +2,13 @@
 
 中文交互式 Linux BBR 与网络转发优化脚本，面向专用转发节点、IX 专线转发、线路中继、国际互联转发和落地节点。
 
-固定目标是“极致满速 + TCP+UDP 双优化 + 可控低抖动”：让测速、新连接和长 RTT 链路尽快跑满，同时限制队列深度，避免无意义堆积。脚本会生成并可应用 BBR、sysctl、RPS、conntrack、initcwnd、nofile、TCP Fast Open 等配置；应用层 mux/smux/yamux/multiplex 默认不会开启。
+固定目标是“极致满速 + TCP+UDP 双优化 + 可控低抖动”：让测速、新连接和长 RTT 链路尽快跑满，同时限制队列深度，避免无意义堆积。脚本会生成并可应用 BBR、sysctl、RPS、conntrack、nofile、TCP Fast Open 等配置；应用层 mux/smux/yamux/multiplex 默认不会开启。
 
-默认业务按 `TCP+UDP 双优化` 处理，不只偏 TCP；UDP 会话、UDP socket 缓冲、netdev 队列、conntrack UDP 容量、socket 默认缓冲、短连接回收和常见 TCP 基础能力都会一起计算。
+默认业务按 `TCP+UDP 双优化` 处理，不只偏 TCP；UDP 会话、UDP socket 上限、netdev 队列、conntrack UDP 容量、短连接回收和常见 TCP 基础能力都会一起计算。
 
-低带宽跨境转发会自动收敛路由初始窗口：当前置入口、IX 专线、线路中继或国际互联场景的瓶颈带宽不高于 `10Mbps` 时，脚本会把 `initcwnd/initrwnd` 从高强度测速窗口降到更稳的低突发窗口。例如 `5Mbps` IX 专线会生成 `initcwnd 64 initrwnd 64`，避免一开连接就把小带宽链路塞出排队和抖动。
+新版默认更尊重内核自适应：TCP 协商能力、ECN、RTT/重排路径学习、route `initcwnd/initrwnd`、`txqueuelen`、socket 默认缓冲、keepalive 等不再硬写。脚本只清理旧版可能残留在默认路由上的 `initcwnd/initrwnd`，之后交给内核、驱动、BBR 和应用按实际路径自适应。
 
-应用新版配置时，脚本会停用旧版安装可能残留的 `initcwnd-enforcer.timer`。这个旧定时器会定期改默认路由窗口，可能和新版 `network-optimize-route.service` 抢 `initcwnd/initrwnd`，也可能在新配置下反复失败刷日志。
+应用新版配置时，脚本会停用旧版安装可能残留的 `initcwnd-enforcer.timer`。这个旧定时器会定期改默认路由窗口；新版会停用它并清理旧 route 窗口，让系统恢复自适应。
 
 conntrack 会区分连接上限和 hash 表大小：`nf_conntrack_max` 仍按机器角色、带宽、会话量和内存预算计算，`hashsize` 会按连接上限约 `1/8` 写入。这样可以避免某些内核在 `nf_conntrack` 模块加载时，把运行态连接上限自动膨胀到脚本目标值的数倍。
 
@@ -79,7 +79,7 @@ bash bbr.sh --help          # 查看帮助
 
 `--wgmimic-required` 是给 WireGuard + Mimic 隧道的一键最小配置：只开启 IPv4/IPv6 转发、关闭 rp_filter、关闭 redirects/source route 等会影响隧道路由的项目，不会改 BBR、队列、RPS 或 conntrack 容量。完整加速仍走普通生成/应用流程。
 
-应用完成后，脚本会打印一段“本次输入、自动选择和生成参数报告”，里面包含你输入的角色/场景/带宽/RTT/丢包抖动、脚本自动判断的 stateful/落地路由/多出口/IPv6 RA/RPS/TFO/busy_poll/会话表强度和判断依据，以及最终生成的核心参数。可以整段复制给 Codex 检查是否合理。
+应用完成后，脚本会打印一段“本次输入、自动选择和生成参数报告”，里面包含你输入的角色/场景/带宽/RTT/丢包抖动、脚本自动判断的 stateful/落地路由/多出口/IPv6 RA/RPS/TFO/busy_poll/会话表强度和判断依据，以及最终生成的核心参数。报告也会列出哪些项目已交回系统自适应，可以整段复制给 Codex 检查是否合理。
 
 ## 输出目录
 
@@ -122,7 +122,7 @@ bash bbr.sh --out-dir /root/bbr-output
 - 纯转发节点不会默认开启 TCP Fast Open，因为 nftables 内核转发不终止 TCP 连接，单边开启 TFO 对被转发连接没有实际帮助。
 - 落地节点会自动检测现有 forwarding、NAT/TProxy 规则和隧道接口；只有机器同时承担 NAT、路由或 nftables 转发时才会按路由出口处理。
 - 脚本会在应用实时配置前生成回滚文件。
-- BBR1/未知内核都会尝试启用 `bbr` 拥塞控制；`BBR3` 选项只影响计算倍数和 ECN 策略，不代表只有 BBR3 才能启用 BBR。
+- BBR1/未知内核都会尝试启用 `bbr` 拥塞控制；脚本不再全局强写 ECN，保留内核默认策略和对端协商。
 
 ## 术语备注
 
@@ -131,6 +131,6 @@ bash bbr.sh --out-dir /root/bbr-output
 - nftables：Linux 防火墙和内核转发规则框架。
 - RPS：Receive Packet Steering，用于把网卡收包处理分散到多个 CPU。
 - conntrack：连接跟踪，NAT、状态防火墙和部分转发规则会用到。
-- initcwnd / initrwnd：路由级 TCP 初始拥塞窗口和初始接收窗口。
+- initcwnd / initrwnd：路由级 TCP 初始拥塞窗口和初始接收窗口；新版默认不指定，只清理旧残留。
 - nofile：进程可打开文件描述符上限。
 - TCP Fast Open / TFO：减少 TCP 建连握手延迟的机制，只对本机发起或本机终止的 TCP 连接有意义。

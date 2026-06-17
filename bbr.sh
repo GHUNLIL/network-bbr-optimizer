@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.17.4"
+VERSION="2026.06.17.5"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -12,7 +12,7 @@ AUTO_TCP_CAP=$((2047 * MIB))
 # nftables/conntrack/sysctl/systemd：Linux 内核转发、防火墙状态跟踪、内核参数和服务管理组件名。
 # fq/fq_codel/qdisc：Linux 队列调度器名，保留英文。
 # busy_poll/busy_read：Linux 低延迟轮询参数名，保留英文。
-# initcwnd/initrwnd/txqueuelen/nofile：路由初始窗口、网卡发送队列和文件描述符限制参数名。
+# initcwnd/initrwnd/txqueuelen/nofile：路由初始窗口、网卡发送队列和文件描述符限制参数名；新版默认只清理旧窗口残留，不再强写。
 
 ROLE=""
 SCENE=""
@@ -784,14 +784,14 @@ infer_auto_topology() {
     LANDING_ROUTES_REASON="角色=转发节点，不使用落地路由开关"
   else
     SCENE="landing"
-    if [[ "$forwarding" == "yes" || "$nat" == "yes" || "$tunnel" == "yes" ]]; then
+    if [[ "$nat" == "yes" || "$tunnel" == "yes" ]] || [[ "$forwarding" == "yes" && "$policy" == "yes" ]]; then
       LANDING_ROUTES="yes"
-      LANDING_ROUTES_REASON="检测到 forwarding/NAT/TProxy/隧道接口痕迹，落地机同时按路由出口处理"
+      LANDING_ROUTES_REASON="检测到 NAT/TProxy/隧道接口/策略路由转发痕迹，落地机同时按路由出口处理"
       STATEFUL="yes"
       STATEFUL_REASON="落地路由=是，需要 conntrack/NAT 状态容量"
     else
       LANDING_ROUTES="no"
-      LANDING_ROUTES_REASON="未检测到 forwarding/NAT/TProxy/隧道接口，落地机按本机应用出口处理"
+      LANDING_ROUTES_REASON="未检测到 NAT/TProxy/隧道接口/策略路由转发痕迹，落地机按本机应用出口处理"
       STATEFUL="no"
       STATEFUL_REASON="落地路由=否，不主动放大 conntrack"
     fi
@@ -893,6 +893,11 @@ emit_sysctl() {
   fi
 }
 
+emit_adaptive_note() {
+  local key="$1" reason="$2"
+  printf '# 保留系统自适应，不写入: %s (%s)\n' "$key" "$reason" >> "$SYSCTL_OUT"
+}
+
 apply_generated_sysctl_live() {
   local file="$1" line key value
   while IFS= read -r line; do
@@ -911,7 +916,7 @@ apply_generated_sysctl_live() {
 disable_legacy_initcwnd_enforcer() {
   command -v systemctl >/dev/null 2>&1 || return 0
   if [[ -e /etc/systemd/system/initcwnd-enforcer.timer || -e /etc/systemd/system/initcwnd-enforcer.service || -e /usr/local/bin/enforce-initcwnd.sh ]]; then
-    warn "发现旧版 initcwnd-enforcer，已停用，避免和 network-optimize-route.service 抢 initcwnd/initrwnd。"
+    warn "发现旧版 initcwnd-enforcer，已停用；新版默认交给内核自适应，不再强写 initcwnd/initrwnd。"
     systemctl disable --now initcwnd-enforcer.timer >/dev/null 2>&1 || true
     systemctl reset-failed initcwnd-enforcer.service initcwnd-enforcer.timer >/dev/null 2>&1 || true
   fi
@@ -990,7 +995,7 @@ EOF
 systemctl daemon-reexec 2>/dev/null || true
 systemctl daemon-reload 2>/dev/null || true
 sysctl --system || true
-echo "回滚文件已恢复。conntrack hashsize、路由 initcwnd 或网卡运行时状态可能需要重启网络或重启系统才会完全回退。"
+echo "回滚文件已恢复。conntrack hashsize、路由或网卡运行时状态可能需要重启网络或重启系统才会完全回退。"
 EOF
   chmod +x "$rollback"
 }
@@ -1275,8 +1280,6 @@ UP_BDP=$((UP_MBPS * UP_RTT * 125))
 DOWN_BDP=$((DOWN_MBPS * DOWN_RTT * 125))
 BDP=$(max "$UP_BDP" "$DOWN_BDP")
 MBW=$(max "$UP_MBPS" "$DOWN_MBPS")
-MINBW=$(min "$UP_MBPS" "$DOWN_MBPS")
-MINBW=$(max "$MINBW" 1)
 MAXRTT=$(max "$UP_RTT" "$DOWN_RTT")
 
 if [[ "$BBR_KIND" == "bbr3" ]]; then
@@ -1308,12 +1311,10 @@ if (( LOSS_BP >= 100 )) || [[ "$JITTER_GUARD" == "yes" ]] || [[ "$BUSINESS" == "
   QUEUE_JITTER_GUARD="yes"
   BDP_MULT=$(min "$BDP_MULT" 12)
   NETDEV_BACKLOG_CAP=524288
-  TXQUEUELEN_CAP=12000
   NETDEV_BUDGET_USECS_CAP=10000
 else
   QUEUE_JITTER_GUARD="no"
   NETDEV_BACKLOG_CAP=1048576
-  TXQUEUELEN_CAP=20000
   NETDEV_BUDGET_USECS_CAP=12000
 fi
 
@@ -1342,11 +1343,7 @@ TCP_MAX=$(max "$TCP_MAX" $((8 * MIB)))
 read -r TCP_RMEM_MIN TCP_RMEM_DEFAULT _ <<< "$(read_sysctl net.ipv4.tcp_rmem '4096 87380 6291456')"
 read -r TCP_WMEM_MIN TCP_WMEM_DEFAULT _ <<< "$(read_sysctl net.ipv4.tcp_wmem '4096 65536 4194304')"
 
-ECN=0
-[[ "$BBR_KIND" == "bbr3" ]] && ECN=2
-
 TFO_VALUE=""
-TFO_BLACKHOLE=""
 if [[ "$HANDSHAKE" == "yes" ]]; then
   if [[ "$LOCAL_TCP_TERMINATION" == "yes" ]]; then
     TFO_VALUE=3
@@ -1356,29 +1353,7 @@ if [[ "$HANDSHAKE" == "yes" ]]; then
   if [[ "$TFO_GLOBAL" == "yes" && -n "$TFO_VALUE" ]]; then
     TFO_VALUE=$((TFO_VALUE | 1024))
   fi
-  if [[ -n "$TFO_VALUE" ]]; then
-    if [[ "$SCENE" == "ix" && "$LOSS_BP" -lt 50 && "$QUEUE_JITTER_GUARD" == "no" ]]; then
-      TFO_BLACKHOLE=0
-    else
-      TFO_BLACKHOLE=60
-    fi
-  fi
 fi
-
-if [[ "$TARGET" == "throughput" ]]; then
-  LOWAT_FACTOR=384
-  LOWAT_LO=$((128 * 1024))
-  LOWAT_HI=$((2 * MIB))
-elif [[ "$BUSINESS" == "mixed" ]]; then
-  LOWAT_FACTOR=320
-  LOWAT_LO=$((128 * 1024))
-  LOWAT_HI=$((1536 * 1024))
-else
-  LOWAT_FACTOR=256
-  LOWAT_LO=$((64 * 1024))
-  LOWAT_HI=$((1 * MIB))
-fi
-LOWAT=$(clamp $((MBW * LOWAT_FACTOR)) "$LOWAT_LO" "$LOWAT_HI")
 
 UDP_FACTOR=8192
 [[ "$BUSINESS" == "mixed" ]] && UDP_FACTOR=12288
@@ -1411,77 +1386,11 @@ UDP_PRESSURE=$((UDP_MAX_PAGES * 3 / 4))
 
 OMEM_CAP=$(clamp $((TCP_MAX / 8)) "$MIB" $((16 * MIB)))
 OPTMEM=$(clamp $((MBW * 256 + UDP_SESSIONS / 4)) $((256 * 1024)) "$OMEM_CAP")
-SOCK_DEFAULT=$(clamp $((MBW * 1024 + UDP_SESSIONS / 8)) $((256 * 1024)) $((4 * MIB)))
-if [[ "$BUSINESS" == "mixed" ]]; then
-  SOCK_DEFAULT=$(clamp $((SOCK_DEFAULT * 3 / 2)) $((512 * 1024)) $((8 * MIB)))
-elif [[ "$TARGET" == "throughput" ]]; then
-  SOCK_DEFAULT=$(clamp "$SOCK_DEFAULT" "$MIB" $((8 * MIB)))
-fi
 
 if [[ "$BUSY_MODE" == "force" ]] || { [[ "$BUSY_MODE" == "auto" ]] && (( MBW >= 20 )) && { (( MAXRTT <= 20 )) || [[ "$BUSINESS" == "udp_game" && "$MAXRTT" -le 10 ]]; }; }; then
   BUSY_POLL=$(clamp $((20 + MBW / (CPU_COUNT + 1))) 20 400)
 else
   BUSY_POLL=""
-fi
-
-if (( MAXRTT <= 10 )); then
-  INITCWND=512
-elif (( MAXRTT <= 50 )); then
-  INITCWND=384
-elif (( MAXRTT <= 120 )); then
-  INITCWND=256
-else
-  INITCWND=160
-fi
-INITCWND=$(clamp "$INITCWND" 32 512)
-INITRWND="$INITCWND"
-LOW_BANDWIDTH_INIT_GUARD="no"
-if [[ "$ROLE" == "forwarding" ]]; then
-  case "$SCENE" in
-    front|ix|relay|international)
-      if (( MINBW <= 2 )); then
-        INITCWND=$(min "$INITCWND" 32)
-        INITRWND=$(min "$INITRWND" 32)
-        LOW_BANDWIDTH_INIT_GUARD="yes"
-      elif (( MINBW <= 10 )); then
-        INITCWND=$(min "$INITCWND" 64)
-        INITRWND=$(min "$INITRWND" 64)
-        LOW_BANDWIDTH_INIT_GUARD="yes"
-      elif (( MINBW <= 20 )); then
-        INITCWND=$(min "$INITCWND" 128)
-        INITRWND=$(min "$INITRWND" 128)
-        LOW_BANDWIDTH_INIT_GUARD="yes"
-      fi
-      ;;
-  esac
-fi
-INITCWND=$(clamp "$INITCWND" 32 512)
-INITRWND=$(clamp "$INITRWND" 32 512)
-
-MIN_RTT_WLEN=120
-[[ "$TARGET" == "throughput" ]] && MIN_RTT_WLEN=180
-MIN_RTT_WLEN=$((MIN_RTT_WLEN + (JITTER_MS + 9) / 10))
-MIN_RTT_WLEN=$(clamp "$MIN_RTT_WLEN" 20 300)
-
-REORDERING=$((128 + MAXRTT * 2 + JITTER_MS * 8 + LOSS_BP))
-if [[ "$TARGET" == "throughput" ]]; then
-  REORDERING=$((REORDERING * 13 / 10))
-else
-  REORDERING=$((REORDERING * 12 / 10))
-fi
-REORDERING=$(clamp "$REORDERING" 128 2000)
-
-KEEP_TIME=30
-KEEP_INTVL=10
-KEEP_PROBES=3
-if [[ "$BUSINESS" == "web" ]]; then
-  KEEP_TIME=120
-  KEEP_INTVL=20
-  KEEP_PROBES=5
-elif (( TCP_CONNS > 200000 )); then
-  KEEP_TIME=45
-  KEEP_INTVL=15
-  KEEP_PROBES=4
 fi
 
 TCP_LIMIT_FACTOR=6
@@ -1524,14 +1433,6 @@ CT_UPPER=$(min 16777216 "$(max 131072 "$CT_MEM_CAP")")
 NF_CONNTRACK_MAX=$(clamp "$(pow2ceil "$CT_RAW")" 131072 "$CT_UPPER")
 NF_CONNTRACK_HASH_RAW=$(ceil_div "$NF_CONNTRACK_MAX" 8)
 NF_CONNTRACK_BUCKETS=$(pow2ceil "$(clamp "$NF_CONNTRACK_HASH_RAW" 32768 16777216)")
-CT_RESET_RAW=$((TCP_CONNS / 2 + UDP_SESSIONS + CPS * 30))
-CT_RESET_MEM_CAP=$((MEM_TOTAL_BYTES / 8192))
-CT_RESET_UPPER=$(min 2097152 "$(max 131072 "$CT_RESET_MEM_CAP")")
-NF_CONNTRACK_RESET_MAX=$(clamp "$(pow2ceil "$CT_RESET_RAW")" 131072 "$CT_RESET_UPPER")
-CT_COUNT_NOW="$(read_sysctl net.netfilter.nf_conntrack_count 0)"
-if [[ "$CT_COUNT_NOW" =~ ^[0-9]+$ ]] && (( CT_COUNT_NOW > 0 )); then
-  NF_CONNTRACK_RESET_MAX=$(max "$NF_CONNTRACK_RESET_MAX" "$(pow2ceil $((CT_COUNT_NOW * 2)))")
-fi
 
 CT_TCP_EST=900
 [[ "$BUSINESS" == "web" ]] && CT_TCP_EST=1200
@@ -1540,13 +1441,6 @@ CT_UDP=45
 [[ "$BUSINESS" == "mixed" ]] && CT_UDP=35
 [[ "$BUSINESS" == "udp_game" ]] && CT_UDP=30
 CT_UDP_STREAM=180
-
-TXQUEUELEN=$((MBW / 2 + MAXRTT * 10 + UDP_SESSIONS / 1000))
-TXQUEUELEN=$((TXQUEUELEN * 15 / 10))
-[[ "$TARGET" == "throughput" ]] && TXQUEUELEN=$((TXQUEUELEN * 13 / 10))
-[[ "$BUSINESS" == "mixed" ]] && TXQUEUELEN=$((TXQUEUELEN + 250))
-[[ "$BUSINESS" == "udp_game" ]] && TXQUEUELEN=$((TXQUEUELEN + 500))
-TXQUEUELEN=$(clamp "$TXQUEUELEN" 500 "$TXQUEUELEN_CAP")
 
 RX_QUEUES=$(max "$RX_QUEUES" 1)
 NETDEV_BUDGET=$(clamp $((RX_QUEUES * 800)) 1600 20000)
@@ -1582,38 +1476,38 @@ fi
 emit_sysctl fs.file-max "$FS_FILE_MAX"
 emit_sysctl net.core.rmem_max "$TCP_MAX"
 emit_sysctl net.core.wmem_max "$TCP_MAX"
-emit_sysctl net.core.rmem_default "$SOCK_DEFAULT"
-emit_sysctl net.core.wmem_default "$SOCK_DEFAULT"
+emit_adaptive_note net.core.rmem_default "保留发行版/应用默认 socket 缓冲，避免所有连接被固定放大"
+emit_adaptive_note net.core.wmem_default "保留发行版/应用默认 socket 缓冲，避免所有连接被固定放大"
 emit_sysctl net.ipv4.tcp_rmem "$TCP_RMEM_MIN $TCP_RMEM_DEFAULT $TCP_MAX"
 emit_sysctl net.ipv4.tcp_wmem "$TCP_WMEM_MIN $TCP_WMEM_DEFAULT $TCP_MAX"
-emit_sysctl net.ipv4.tcp_window_scaling 1
-emit_sysctl net.ipv4.tcp_timestamps 1
-emit_sysctl net.ipv4.tcp_sack 1
-emit_sysctl net.ipv4.tcp_dsack 1
-emit_sysctl net.ipv4.tcp_moderate_rcvbuf 1
+emit_adaptive_note net.ipv4.tcp_window_scaling "TCP 能力由内核和对端协商"
+emit_adaptive_note net.ipv4.tcp_timestamps "TCP 能力由内核和对端协商"
+emit_adaptive_note net.ipv4.tcp_sack "TCP 能力由内核和对端协商"
+emit_adaptive_note net.ipv4.tcp_dsack "TCP 能力由内核和对端协商"
+emit_adaptive_note net.ipv4.tcp_moderate_rcvbuf "TCP 接收缓冲由内核自动调节"
 emit_sysctl net.core.optmem_max "$OPTMEM"
-emit_sysctl net.ipv4.tcp_notsent_lowat "$LOWAT"
-emit_sysctl net.ipv4.tcp_slow_start_after_idle 0
-emit_sysctl net.ipv4.tcp_min_rtt_wlen "$MIN_RTT_WLEN"
-emit_sysctl net.ipv4.tcp_max_reordering "$REORDERING"
-emit_sysctl net.ipv4.tcp_ecn "$ECN"
+emit_adaptive_note net.ipv4.tcp_notsent_lowat "应用/内核按连接发送队列自适应，避免固定 lowat 影响不同服务"
+emit_adaptive_note net.ipv4.tcp_slow_start_after_idle "保留内核默认 idle 后慢启动，避免小带宽链路突发排队"
+emit_adaptive_note net.ipv4.tcp_min_rtt_wlen "BBR/内核按路径学习 RTT，不固定观察窗口"
+emit_adaptive_note net.ipv4.tcp_max_reordering "重排容忍由内核按路径学习，不固定全局阈值"
+emit_adaptive_note net.ipv4.tcp_ecn "ECN 由内核默认策略和对端协商，不全局强制开关"
 if [[ -n "$TFO_VALUE" ]]; then
   emit_sysctl net.ipv4.tcp_fastopen "$TFO_VALUE"
-  [[ -n "$TFO_BLACKHOLE" ]] && emit_sysctl net.ipv4.tcp_fastopen_blackhole_timeout_sec "$TFO_BLACKHOLE"
+  emit_adaptive_note net.ipv4.tcp_fastopen_blackhole_timeout_sec "保留内核默认黑洞检测退避"
 else
   printf '# 已跳过: 纯内核转发且本机不终止 TCP 时，tcp_fastopen 对被转发连接没有实际帮助\n' >> "$SYSCTL_OUT"
-  emit_sysctl net.ipv4.tcp_fastopen 0
+  emit_adaptive_note net.ipv4.tcp_fastopen "不再为纯转发机硬写 0，保留系统/其他服务自己的设置"
 fi
 emit_sysctl net.ipv4.tcp_mtu_probing 1
 emit_sysctl net.ipv4.tcp_rfc1337 1
-emit_sysctl net.ipv4.tcp_no_metrics_save 1
+emit_adaptive_note net.ipv4.tcp_no_metrics_save "保留内核目的地 metrics 学习能力"
 emit_sysctl net.ipv4.tcp_tw_reuse 1
 emit_sysctl net.ipv4.tcp_max_tw_buckets "$TW_BUCKETS"
 emit_sysctl net.ipv4.tcp_fin_timeout "$FIN_TIMEOUT"
 emit_sysctl net.ipv4.tcp_syncookies 1
-emit_sysctl net.ipv4.tcp_keepalive_time "$KEEP_TIME"
-emit_sysctl net.ipv4.tcp_keepalive_intvl "$KEEP_INTVL"
-emit_sysctl net.ipv4.tcp_keepalive_probes "$KEEP_PROBES"
+emit_adaptive_note net.ipv4.tcp_keepalive_time "keepalive 更适合由应用或发行版默认控制"
+emit_adaptive_note net.ipv4.tcp_keepalive_intvl "keepalive 更适合由应用或发行版默认控制"
+emit_adaptive_note net.ipv4.tcp_keepalive_probes "keepalive 更适合由应用或发行版默认控制"
 emit_sysctl net.ipv4.tcp_limit_output_bytes "$TCP_LIMIT"
 emit_sysctl net.core.somaxconn "$SOMAXCONN"
 emit_sysctl net.ipv4.tcp_max_syn_backlog "$SYN_BACKLOG"
@@ -1647,12 +1541,12 @@ if [[ "$ROLE" == "forwarding" || "$LANDING_ROUTES" == "yes" ]]; then
     printf '# IPv6 默认路由依赖 %s 的 RA：如需保留默认路由，请在接口级单独设置 accept_ra=2，不要写到 all/default。\n' "$DEFAULT_IFACE" >> "$SYSCTL_OUT"
   fi
 else
-  printf '# 落地节点未启用 NAT/路由：显式关闭以前可能残留的内核转发。\n' >> "$SYSCTL_OUT"
-  emit_sysctl net.ipv4.ip_forward 0
-  emit_sysctl net.ipv6.conf.all.forwarding 0
-  emit_sysctl net.ipv6.conf.default.forwarding 0
-  emit_sysctl net.ipv4.conf.all.rp_filter "$RP_FILTER"
-  emit_sysctl net.ipv4.conf.default.rp_filter "$RP_FILTER"
+  printf '# 落地节点未启用 NAT/路由：不写 ip_forward/rp_filter，保留系统或其他服务自己的网络策略。\n' >> "$SYSCTL_OUT"
+  emit_adaptive_note net.ipv4.ip_forward "纯落地机不主动覆盖"
+  emit_adaptive_note net.ipv6.conf.all.forwarding "纯落地机不主动覆盖"
+  emit_adaptive_note net.ipv6.conf.default.forwarding "纯落地机不主动覆盖"
+  emit_adaptive_note net.ipv4.conf.all.rp_filter "纯落地机不主动覆盖"
+  emit_adaptive_note net.ipv4.conf.default.rp_filter "纯落地机不主动覆盖"
 fi
 
 if [[ "$CT_NEEDED" == "yes" ]]; then
@@ -1661,16 +1555,16 @@ if [[ "$CT_NEEDED" == "yes" ]]; then
   emit_sysctl net.netfilter.nf_conntrack_udp_timeout "$CT_UDP"
   emit_sysctl net.netfilter.nf_conntrack_udp_timeout_stream "$CT_UDP_STREAM"
 else
-  printf '# 当前角色不需要本脚本放大 conntrack；这里写入安全回落值，覆盖旧转发配置残留。\n' >> "$SYSCTL_OUT"
-  emit_sysctl net.netfilter.nf_conntrack_max "$NF_CONNTRACK_RESET_MAX"
+  printf '# 当前角色不需要本脚本放大 conntrack：不写 nf_conntrack_max，交给内核/防火墙配置自适应。\n' >> "$SYSCTL_OUT"
+  emit_adaptive_note net.netfilter.nf_conntrack_max "当前不是状态转发/NAT 出口"
 fi
 
 if [[ -n "$BUSY_POLL" ]]; then
   emit_sysctl net.core.busy_poll "$BUSY_POLL"
   emit_sysctl net.core.busy_read "$BUSY_POLL"
 else
-  emit_sysctl net.core.busy_poll 0
-  emit_sysctl net.core.busy_read 0
+  emit_adaptive_note net.core.busy_poll "当前场景不需要低延迟轮询，不硬写 0 覆盖系统/其他服务"
+  emit_adaptive_note net.core.busy_read "当前场景不需要低延迟轮询，不硬写 0 覆盖系统/其他服务"
 fi
 
 cat > "$LIMITS_OUT" <<EOF
@@ -1702,29 +1596,30 @@ tcp_bbr
 sch_fq
 EOF
 
-cat > "$ROUTE_OUT" <<EOF
+cat > "$ROUTE_OUT" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-apply_init() {
-  local family="\$1" line clean
+clean_route_init() {
+  local family="$1" line clean
   local -a route_parts
-  if [[ "\$family" == "4" ]]; then
+  if [[ "$family" == "4" ]]; then
     ip route show default 2>/dev/null
   else
     ip -6 route show default 2>/dev/null
   fi | while IFS= read -r line; do
-    [[ -z "\$line" ]] && continue
-    clean=\$(printf '%s' "\$line" | sed -E 's/ initcwnd [0-9]+//g; s/ initrwnd [0-9]+//g')
-    read -r -a route_parts <<< "\$clean"
-    if [[ "\$family" == "4" ]]; then
-      ip route replace "\${route_parts[@]}" initcwnd $INITCWND initrwnd $INITRWND || true
+    [[ -z "$line" ]] && continue
+    [[ "$line" == *" initcwnd "* || "$line" == *" initrwnd "* ]] || continue
+    clean=$(printf '%s' "$line" | sed -E 's/ initcwnd [0-9]+//g; s/ initrwnd [0-9]+//g')
+    read -r -a route_parts <<< "$clean"
+    if [[ "$family" == "4" ]]; then
+      ip route replace "${route_parts[@]}" || true
     else
-      ip -6 route replace "\${route_parts[@]}" initcwnd $INITCWND initrwnd $INITRWND || true
+      ip -6 route replace "${route_parts[@]}" || true
     fi
   done
 }
-apply_init 4
-apply_init 6
+clean_route_init 4
+clean_route_init 6
 EOF
 chmod +x "$ROUTE_OUT"
 
@@ -1732,12 +1627,10 @@ cat > "$NIC_OUT" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 IFACE="${DEFAULT_IFACE}"
-TXQ="$TXQUEUELEN"
 RPS_ENABLE="$RPS_ENABLE"
 RPS_CPUS="$RPS_CPUS"
 RPS_FLOW_CNT="$RPS_FLOW_CNT"
 if [[ -d "/sys/class/net/\$IFACE" ]]; then
-  ip link set dev "\$IFACE" txqueuelen "\$TXQ" || true
   if [[ "\$RPS_ENABLE" == "yes" ]]; then
     for f in /sys/class/net/"\$IFACE"/queues/rx-*/rps_cpus; do
       [[ -e "\$f" ]] && printf '%s' "\$RPS_CPUS" > "\$f" || true
@@ -1794,15 +1687,15 @@ IPv6_RA依据=$IPV6_RA_REASON
 TFO建连优化=$HANDSHAKE
 TFO全局监听=$TFO_GLOBAL
 TFO值=${TFO_VALUE:-已跳过}
-TFO黑洞检测=${TFO_BLACKHOLE:-已跳过}
-busy_poll=$BUSY_POLL
+TFO黑洞检测=系统默认（不写入）
+busy_poll=${BUSY_POLL:-系统默认（不写入）}
 RPS启用=$RPS_ENABLE
 RPS_CPU掩码=$RPS_CPUS
 RPS单队列流表=$RPS_FLOW_CNT
 会话表并发强度_输入=$(choice_short_label "$CONCURRENCY_MODE")
 会话表实际强度=$(choice_short_label "$CONCURRENCY_EFFECTIVE")
 队列抖动保护=$QUEUE_JITTER_GUARD
-低带宽初始窗口保护=$LOW_BANDWIDTH_INIT_GUARD
+低带宽初始窗口保护=交给内核自适应（不写 route initcwnd/initrwnd）
 需要conntrack=$CT_NEEDED
 模块开机加载=tcp_bbr, sch_fq
 
@@ -1814,18 +1707,25 @@ UDP会话=$UDP_SESSIONS
 BDP_bytes=$BDP
 BDP倍数=$BDP_MULT
 TCP缓冲上限=$TCP_MAX
-socket默认缓冲=$SOCK_DEFAULT
+socket默认缓冲=系统默认（不写 rmem_default/wmem_default）
 tcp_limit_output_bytes=$TCP_LIMIT
-initcwnd=$INITCWND
-initrwnd=$INITRWND
+initcwnd=系统默认（仅清理旧 route initcwnd 残留）
+initrwnd=系统默认（仅清理旧 route initrwnd 残留）
 nofile=$NOFILE
 TIME_WAIT上限=$TW_BUCKETS
 fin_timeout=$FIN_TIMEOUT
 netdev_max_backlog=$NETDEV_BACKLOG
-txqueuelen=$TXQUEUELEN
+txqueuelen=系统/驱动默认（不写 ip link txqueuelen）
 nf_conntrack_max=$NF_CONNTRACK_MAX
 nf_conntrack_hashsize=$NF_CONNTRACK_BUCKETS
-不需要conntrack时的安全回落上限=$NF_CONNTRACK_RESET_MAX
+不需要conntrack时的安全回落上限=系统默认（不写 nf_conntrack_max）
+
+[系统自适应保留]
+TCP协商能力=tcp_window_scaling/timestamps/sack/dsack 不写入
+TCP路径学习=tcp_min_rtt_wlen/tcp_max_reordering/tcp_no_metrics_save 不写入
+发送队列细节=tcp_notsent_lowat/route initcwnd/txqueuelen 不写入
+应用心跳=tcp_keepalive_time/intvl/probes 不写入
+纯落地机网络状态=不强行写 ip_forward=0/rp_filter
 
 [生成文件]
 sysctl=$SYSCTL_OUT
@@ -1883,7 +1783,7 @@ install_file "$NIC_OUT" /usr/local/sbin/network-optimize-nic.sh 0755 "$BACKUP_DI
 
 cat > "$OUT_DIR/network-optimize-route.service" <<'EOF'
 [Unit]
-Description=应用网络优化路由 initcwnd
+Description=清理旧网络优化路由 initcwnd 残留
 After=network-online.target
 Wants=network-online.target
 
@@ -1896,7 +1796,7 @@ WantedBy=multi-user.target
 EOF
 cat > "$OUT_DIR/network-optimize-nic.service" <<'EOF'
 [Unit]
-Description=应用网络优化网卡 txqueuelen 和 RPS
+Description=应用网络优化网卡 RPS
 After=network-online.target
 Wants=network-online.target
 
@@ -1920,18 +1820,6 @@ disable_legacy_initcwnd_enforcer
 sysctl --system
 apply_generated_sysctl_live "$SYSCTL_OUT"
 sync_conntrack_hashsize_live
-if [[ "$CT_NEEDED" != "yes" ]] && sysctl_exists net.netfilter.nf_conntrack_max; then
-  CT_CURRENT="$(read_sysctl net.netfilter.nf_conntrack_max 0)"
-  CT_COUNT="$(read_sysctl net.netfilter.nf_conntrack_count 0)"
-  if [[ "$CT_CURRENT" =~ ^[0-9]+$ && "$CT_COUNT" =~ ^[0-9]+$ ]] && (( CT_CURRENT > NF_CONNTRACK_RESET_MAX )); then
-    if (( CT_COUNT < NF_CONNTRACK_RESET_MAX )); then
-      sysctl -w "net.netfilter.nf_conntrack_max=$NF_CONNTRACK_RESET_MAX" >/dev/null 2>&1 || \
-        warn "nf_conntrack_max 当前运行值未能降回 $NF_CONNTRACK_RESET_MAX，重启后会按系统默认重新计算。"
-    else
-      warn "当前 conntrack 已用 $CT_COUNT，暂不把 nf_conntrack_max 降到 $NF_CONNTRACK_RESET_MAX，避免影响现有连接。"
-    fi
-  fi
-fi
 systemctl daemon-reexec 2>/dev/null || true
 systemctl daemon-reload 2>/dev/null || true
 systemctl enable --now network-optimize-route.service 2>/dev/null || true
@@ -1946,4 +1834,7 @@ print_final_sysctl_status
 
 printf '\n已应用配置。回滚脚本: %s/rollback.sh\n' "$OUT_DIR"
 printf '备份目录: %s\n' "$BACKUP_DIR"
-printf '如果 nf_conntrack hashsize 发生变化，建议重启系统让它完整生效。\n'
+if [[ "$CT_NEEDED" == "yes" ]]; then
+  printf '如果 nf_conntrack hashsize 发生变化，建议重启系统让它完整生效。\n'
+fi
+printf '已从持久配置中移除可由系统自适应的硬指定项；旧运行态值如来自旧脚本，重启后会进一步回到系统/其他配置默认。\n'
