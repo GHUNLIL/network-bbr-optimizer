@@ -12,7 +12,9 @@
 
 conntrack 会区分连接上限和 hash 表大小：`nf_conntrack_max` 仍按机器角色、带宽、会话量和内存预算计算，`hashsize` 会按连接上限约 `1/8` 写入。这样可以避免某些内核在 `nf_conntrack` 模块加载时，把运行态连接上限自动膨胀到脚本目标值的数倍。
 
-会话表并发强度默认自动判断：脚本会按角色、场景、带宽和内存判断 `balanced/high/extreme`。中高带宽的状态转发前置/IX 机器会自动提升到 `high`，大内存千兆 IX 机器才会升到 `extreme`。`high` 会提高 conntrack、nofile、listen backlog、SYN backlog、TIME_WAIT 和 netdev 队列容量，`extreme` 更激进但仍受内存预算保护。
+会话表并发强度默认自动判断：脚本会按角色、场景、带宽、内存、CPU 核心和 RX 队列判断 `balanced/high/extreme`。中高带宽的状态转发前置/IX 机器会自动提升到 `high`，但 `extreme` 必须同时满足千兆以上、8GiB 以上内存、至少 4 核和 4 条 RX 队列，避免 2 核小机器被误当作大型 IX 汇聚节点。`high` 会提高 conntrack、nofile、listen backlog、SYN backlog、TIME_WAIT 和 netdev 队列容量，`extreme` 更激进但仍受内存、CPU 和队列保护。
+
+IX 场景的 `netdev_max_backlog` 与 `nf_conntrack_max` 现在有资源封顶：2 核/2 队列的几百 Mbps IX 转发机默认不会再生成 `netdev_max_backlog=1048576` 或 `nf_conntrack_max=8388608` 这类过深队列/过大会话表；只有多核、多 RX 队列、千兆以上的大汇聚节点才会逐级放宽。
 
 `stateful`、落地路由、多出口/策略路由、IPv6 RA、本机是否终止 TCP 这些容易误选的拓扑项也会自动推断：脚本会结合角色/场景、当前默认路由、策略路由、NAT/TProxy 规则、隧道接口、IPv6 `proto ra` 默认路由和公开 TCP 监听端口判断，并在应用后的报告里列出判断依据。
 

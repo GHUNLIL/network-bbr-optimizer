@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.17.5"
+VERSION="2026.06.18.1"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -1244,7 +1244,11 @@ if [[ "$CONCURRENCY_EFFECTIVE" == "auto" ]]; then
   if [[ "$ROLE" == "forwarding" && "$STATEFUL" == "yes" ]] && [[ "$SCENE" == "front" || "$SCENE" == "ix" ]] && (( LINK_MBPS_FOR_CONCURRENCY >= 100 )) && (( MEM_TOTAL_KB >= 2048 * 1024 )); then
     CONCURRENCY_EFFECTIVE="high"
   fi
-  if [[ "$ROLE" == "forwarding" && "$STATEFUL" == "yes" && "$SCENE" == "ix" ]] && (( LINK_MBPS_FOR_CONCURRENCY >= 1000 )) && (( MEM_TOTAL_KB >= 8192 * 1024 )); then
+  if [[ "$ROLE" == "forwarding" && "$STATEFUL" == "yes" && "$SCENE" == "ix" ]] \
+     && (( LINK_MBPS_FOR_CONCURRENCY >= 1000 )) \
+     && (( MEM_TOTAL_KB >= 8192 * 1024 )) \
+     && (( CPU_COUNT >= 4 )) \
+     && (( RX_QUEUES >= 4 )); then
     CONCURRENCY_EFFECTIVE="extreme"
   fi
 fi
@@ -1317,6 +1321,21 @@ else
   NETDEV_BACKLOG_CAP=1048576
   NETDEV_BUDGET_USECS_CAP=12000
 fi
+
+NETDEV_RESOURCE_CAP=131072
+if (( MBW >= 300 )) || [[ "$CONCURRENCY_EFFECTIVE" == "high" || "$CONCURRENCY_EFFECTIVE" == "extreme" ]]; then
+  NETDEV_RESOURCE_CAP=262144
+fi
+if (( CPU_COUNT >= 4 && RX_QUEUES >= 4 && MBW >= 1000 )); then
+  NETDEV_RESOURCE_CAP=524288
+fi
+if [[ "$CONCURRENCY_EFFECTIVE" == "extreme" ]] && (( CPU_COUNT >= 8 && RX_QUEUES >= 4 && MBW >= 2000 )); then
+  NETDEV_RESOURCE_CAP=1048576
+fi
+if [[ "$QUEUE_JITTER_GUARD" == "yes" ]]; then
+  NETDEV_RESOURCE_CAP=$(min "$NETDEV_RESOURCE_CAP" 262144)
+fi
+NETDEV_BACKLOG_CAP=$(min "$NETDEV_BACKLOG_CAP" "$NETDEV_RESOURCE_CAP")
 
 ACTIVE_DIV_RAW=$((TCP_CONNS / 5000 + UDP_SESSIONS / 25000 + 4))
 ACTIVE_DIV_CAP=128
@@ -1430,6 +1449,22 @@ CT_RAW=$((TCP_CONNS + UDP_SESSIONS * 2 + CPS * 90))
 [[ "$BUSINESS" == "udp_game" ]] && CT_RAW=$((CT_RAW + UDP_SESSIONS))
 CT_MEM_CAP=$((MEM_TOTAL_BYTES * MEM_PCT / 100 / 512))
 CT_UPPER=$(min 16777216 "$(max 131072 "$CT_MEM_CAP")")
+CT_RESOURCE_CAP=1048576
+case "$CONCURRENCY_EFFECTIVE" in
+  high)
+    CT_RESOURCE_CAP=2097152
+    if (( CPU_COUNT >= 4 && RX_QUEUES >= 2 && MBW >= 500 )); then
+      CT_RESOURCE_CAP=4194304
+    fi
+    ;;
+  extreme)
+    CT_RESOURCE_CAP=8388608
+    if (( CPU_COUNT >= 8 && RX_QUEUES >= 4 && MBW >= 2000 && MEM_TOTAL_KB >= 16384 * 1024 )); then
+      CT_RESOURCE_CAP=16777216
+    fi
+    ;;
+esac
+CT_UPPER=$(min "$CT_UPPER" "$CT_RESOURCE_CAP")
 NF_CONNTRACK_MAX=$(clamp "$(pow2ceil "$CT_RAW")" 131072 "$CT_UPPER")
 NF_CONNTRACK_HASH_RAW=$(ceil_div "$NF_CONNTRACK_MAX" 8)
 NF_CONNTRACK_BUCKETS=$(pow2ceil "$(clamp "$NF_CONNTRACK_HASH_RAW" 32768 16777216)")
@@ -1715,8 +1750,10 @@ nofile=$NOFILE
 TIME_WAIT上限=$TW_BUCKETS
 fin_timeout=$FIN_TIMEOUT
 netdev_max_backlog=$NETDEV_BACKLOG
+netdev_max_backlog_cap=$NETDEV_BACKLOG_CAP
 txqueuelen=系统/驱动默认（不写 ip link txqueuelen）
 nf_conntrack_max=$NF_CONNTRACK_MAX
+nf_conntrack_resource_cap=$CT_RESOURCE_CAP
 nf_conntrack_hashsize=$NF_CONNTRACK_BUCKETS
 不需要conntrack时的安全回落上限=系统默认（不写 nf_conntrack_max）
 
