@@ -1,6 +1,6 @@
 # 中文 BBR 网络优化脚本（Network BBR Optimizer）
 
-中文交互式 Linux BBR 与网络转发优化脚本，默认面向专用转发节点、IX 专线转发、线路中继、国际互联转发和上网链路；建站机器也可使用，但建站不是主要优化目标。
+中文交互式 Linux BBR 与网络转发优化脚本，默认面向专用转发节点、IX 专线转发、线路转发/国际互联和上网链路；建站机器也可使用，但建站不是主要优化目标。
 
 固定目标是“极致满速 + TCP+UDP 双优化 + 可控低抖动”：让测速、新连接和长 RTT 链路尽快跑满，同时限制队列深度，避免无意义堆积。脚本会生成并可应用 BBR、sysctl、RPS、conntrack、nofile、TCP Fast Open 等配置；应用层 mux/smux/yamux/multiplex 默认不会开启。
 
@@ -12,7 +12,9 @@
 
 conntrack 会区分连接上限和 hash 表大小：`nf_conntrack_max` 仍按默认转发画像、转发场景、带宽、会话量和内存预算计算，`hashsize` 会按连接上限约 `1/8` 写入。这样可以避免某些内核在 `nf_conntrack` 模块加载时，把运行态连接上限自动膨胀到脚本目标值的数倍。
 
-会话表并发强度默认自动判断：脚本会按转发场景、带宽、内存、CPU 核心和 RX 队列判断 `balanced/high/extreme`。中高带宽的状态转发前置/IX 机器会自动提升到 `high`，但 `extreme` 必须同时满足千兆以上、8GiB 以上内存、至少 4 核和 4 条 RX 队列，避免 2 核小机器被误当作大型 IX 汇聚节点。`high` 会提高 conntrack、nofile、listen backlog、SYN backlog、TIME_WAIT 和 netdev 队列容量，`extreme` 更激进但仍受内存、CPU 和队列保护。
+会话表并发强度默认自动判断：脚本会按转发场景、带宽、内存、CPU 核心和 RX 队列判断 `balanced/high/extreme`。中高带宽的状态转发前置/IX/线路转发机器会自动提升到 `high`，但 `extreme` 必须同时满足千兆以上、8GiB 以上内存、至少 4 核和 4 条 RX 队列，避免 2 核小机器被误当作大型 IX 汇聚节点。`high` 会提高 conntrack、nofile、listen backlog、SYN backlog、TIME_WAIT 和 netdev 队列容量，`extreme` 更激进但仍受内存、CPU 和队列保护。
+
+`线路转发` 和 `国际互联` 在新版里合并为同一个场景：都代表跨境、长 RTT、WG/Mimic 或公网中继链路，不再给“国际互联”单独套更保守的低缓冲配置。旧版或外部脚本传入的 `international` 名称仍会兼容处理，但按 `relay` 线路转发参数计算。
 
 IX 场景的 `netdev_max_backlog` 与 `nf_conntrack_max` 现在有资源封顶：2 核/2 队列的几百 Mbps IX 转发机默认不会再生成 `netdev_max_backlog=1048576` 或 `nf_conntrack_max=8388608` 这类过深队列/过大会话表；只有多核、多 RX 队列、千兆以上的大汇聚节点才会逐级放宽。
 
@@ -121,7 +123,7 @@ bash bbr.sh --out-dir /root/bbr-output
 
 ## 默认画像说明
 
-- 脚本默认按转发节点优化，包括前置入口、IX 专线、线路中继、国际互联和普通 nftables 转发。
+- 脚本默认按转发节点优化，包括前置入口、IX 专线、线路转发/国际互联和普通 nftables 转发。
 - 纯转发场景不会默认开启 TCP Fast Open，因为 nftables 内核转发不终止 TCP 连接，单边开启 TFO 对被转发连接没有实际帮助。
 - 建站或应用层服务机器也可以使用，但不是主要优化目标；这类机器的公开 TCP 监听、NAT/TProxy、隧道接口和现有 forwarding 状态会作为自动判断依据。
 - 脚本会在应用实时配置前生成回滚文件。

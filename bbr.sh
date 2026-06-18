@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.18.3"
+VERSION="2026.06.18.4"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -96,8 +96,8 @@ choice_label() {
     landing) printf 'landing 落地节点 - 3x-ui/Xray/GOST 等应用层出口机器' ;;
     front) printf 'front 前置入口 - 家里路由器或用户先进入的第一跳转发' ;;
     ix) printf 'IX 专线 - 专线/IX 汇聚跳，只做极致内核转发' ;;
-    relay) printf 'relay 线路中继 - 跨境或长 RTT 线路转发' ;;
-    international) printf 'international 国际互联 - 公网国际段/不可控跨境转发' ;;
+    relay) printf 'relay 线路转发/国际互联 - 跨境、长 RTT、WG/Mimic 或公网中继' ;;
+    international) printf 'international 国际互联 - 兼容旧选项，按 relay 线路转发计算' ;;
     plain) printf 'plain 普通 nftables 转发 - 通用内核转发画像' ;;
     speed) printf 'speed 极致满速 - 新连接和测速尽快跑满，同时控制队列' ;;
     throughput) printf 'throughput 极致吞吐 - 更偏大流量长时间持续吞吐' ;;
@@ -214,8 +214,7 @@ scene_label() {
   case "${SCENE:-plain}" in
     front) printf '前置入口' ;;
     ix) printf 'IX 专线' ;;
-    relay) printf '线路中继' ;;
-    international) printf '国际互联' ;;
+    relay|international) printf '线路转发/国际互联' ;;
     plain) printf '普通 nftables 转发' ;;
     landing) printf '落地' ;;
     *) printf '%s' "$SCENE" ;;
@@ -353,7 +352,7 @@ edit_scene() {
   banner
   printf '%sscene 转发场景%s\n' "$BOLD" "$RESET"
   ROLE="forwarding"
-  SCENE=$(ask_choice "scene 转发场景" "${SCENE:-plain}" front ix relay international plain)
+  SCENE=$(ask_choice "scene 转发场景" "${SCENE:-plain}" front ix relay plain)
   TARGET="speed"
   BUSINESS="mixed"
   infer_auto_topology
@@ -438,7 +437,7 @@ interactive_menu() {
 
 linear_wizard() {
   ROLE="forwarding"
-  SCENE=$(ask_choice "scene 转发场景" "$SCENE" front ix relay international plain)
+  SCENE=$(ask_choice "scene 转发场景" "$SCENE" front ix relay plain)
 
   TARGET="speed"
   BUSINESS="mixed"
@@ -1228,14 +1227,10 @@ if [[ "$ROLE" == "forwarding" ]]; then
       CPS=$((CPS * 18 / 10))
       MEM_PCT=$((MEM_PCT + 12))
       ;;
-    relay)
+    relay|international)
       TCP_CONNS=$((TCP_CONNS * 12 / 10))
-      MEM_PCT=$((MEM_PCT + 6))
-      ;;
-    international)
-      TCP_CONNS=$((TCP_CONNS * 11 / 10))
       UDP_SESSIONS=$((UDP_SESSIONS * 12 / 10))
-      MEM_PCT=$((MEM_PCT + 4))
+      MEM_PCT=$((MEM_PCT + 6))
       ;;
   esac
 fi
@@ -1244,7 +1239,7 @@ CONCURRENCY_EFFECTIVE="$CONCURRENCY_MODE"
 LINK_MBPS_FOR_CONCURRENCY=$(max "$UP_MBPS" "$DOWN_MBPS")
 if [[ "$CONCURRENCY_EFFECTIVE" == "auto" ]]; then
   CONCURRENCY_EFFECTIVE="balanced"
-  if [[ "$ROLE" == "forwarding" && "$STATEFUL" == "yes" ]] && [[ "$SCENE" == "front" || "$SCENE" == "ix" ]] && (( LINK_MBPS_FOR_CONCURRENCY >= 100 )) && (( MEM_TOTAL_KB >= 2048 * 1024 )); then
+  if [[ "$ROLE" == "forwarding" && "$STATEFUL" == "yes" ]] && [[ "$SCENE" == "front" || "$SCENE" == "ix" || "$SCENE" == "relay" || "$SCENE" == "international" ]] && (( LINK_MBPS_FOR_CONCURRENCY >= 100 )) && (( MEM_TOTAL_KB >= 2048 * 1024 )); then
     CONCURRENCY_EFFECTIVE="high"
   fi
   if [[ "$ROLE" == "forwarding" && "$STATEFUL" == "yes" && "$SCENE" == "ix" ]] \
@@ -1307,9 +1302,6 @@ fi
 if [[ "$SCENE" == "ix" ]] && (( LOSS_BP < 100 )); then
   BDP_MULT=$((BDP_MULT + 2))
 fi
-if [[ "$SCENE" == "international" ]] && { (( LOSS_BP >= 100 )) || [[ "$JITTER_GUARD" == "yes" ]]; }; then
-  BDP_MULT=$(min "$BDP_MULT" 12)
-fi
 if (( MANUAL_BDP_MULT > 0 )); then
   BDP_MULT="$MANUAL_BDP_MULT"
 fi
@@ -1350,17 +1342,25 @@ ACTIVE_DIV=$(clamp "$ACTIVE_DIV_RAW" 4 "$ACTIVE_DIV_CAP")
 MEM_AVAIL_BYTES=$((MEM_AVAIL_KB * 1024))
 MEM_TOTAL_BYTES=$((MEM_TOTAL_KB * 1024))
 MEM_CAP=$((MEM_AVAIL_BYTES * MEM_PCT / 100 / ACTIVE_DIV))
+TCP_FLOOR=$((16 * MIB))
+if [[ "$ROLE" == "landing" && "$LANDING_ROUTES" != "yes" ]]; then
+  TCP_FLOOR=$((8 * MIB))
+fi
+if (( MEM_TOTAL_KB < 768 * 1024 )); then
+  TCP_FLOOR=$((8 * MIB))
+fi
+
 if (( MANUAL_TCP_CAP_MB > 0 )); then
   HARD_CAP=$((MANUAL_TCP_CAP_MB * MIB))
 else
   HARD_CAP=$(min "$AUTO_TCP_CAP" "$MEM_CAP")
 fi
-HARD_CAP=$(max "$HARD_CAP" $((8 * MIB)))
+HARD_CAP=$(max "$HARD_CAP" "$TCP_FLOOR")
 DESIRED=$((BDP * BDP_MULT))
 TCP_MAX=$(round_up_mib "$DESIRED")
-TCP_MAX=$(max "$TCP_MAX" $((16 * MIB)))
+TCP_MAX=$(max "$TCP_MAX" "$TCP_FLOOR")
 TCP_MAX=$(min "$TCP_MAX" "$HARD_CAP")
-TCP_MAX=$(max "$TCP_MAX" $((8 * MIB)))
+TCP_MAX=$(max "$TCP_MAX" "$TCP_FLOOR")
 
 read -r TCP_RMEM_MIN TCP_RMEM_DEFAULT _ <<< "$(read_sysctl net.ipv4.tcp_rmem '4096 87380 6291456')"
 read -r TCP_WMEM_MIN TCP_WMEM_DEFAULT _ <<< "$(read_sysctl net.ipv4.tcp_wmem '4096 65536 4194304')"
@@ -1418,7 +1418,6 @@ fi
 TCP_LIMIT_FACTOR=6
 [[ "$TARGET" == "throughput" ]] && TCP_LIMIT_FACTOR=8
 if [[ "$SCENE" == "ix" && "$LOSS_BP" -lt 50 ]]; then TCP_LIMIT_FACTOR=8; fi
-if [[ "$SCENE" == "international" ]]; then TCP_LIMIT_FACTOR=5; fi
 if (( LOSS_BP >= 100 )) || [[ "$QUEUE_JITTER_GUARD" == "yes" ]]; then TCP_LIMIT_FACTOR=4; fi
 if [[ "$BUSINESS" == "udp_game" ]]; then TCP_LIMIT_FACTOR=3; fi
 LIMIT_UPPER=$(clamp $((TCP_MAX / 2)) $((4 * MIB)) $((64 * MIB)))
