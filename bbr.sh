@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.18.1"
+VERSION="2026.06.18.2"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -1010,7 +1010,14 @@ emit_wgmimic_required_sysctl() {
 }
 
 write_wgmimic_required_sysctl_file() {
-  local file="$1"
+  local file="$1" default_iface="${DEFAULT_IFACE:-}" preserve_ra="no"
+  [[ -n "$default_iface" ]] || default_iface="$(detect_default_iface)"
+  if [[ -n "$default_iface" ]]; then
+    DEFAULT_IFACE="$default_iface"
+    if ipv6_default_uses_ra || iface_accepts_ra; then
+      preserve_ra="yes"
+    fi
+  fi
   : > "$file"
   {
     printf '# 由 bbr.sh %s 生成，时间: %s\n' "$VERSION" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -1032,6 +1039,10 @@ write_wgmimic_required_sysctl_file() {
   emit_wgmimic_required_sysctl "$file" net.ipv6.conf.default.accept_redirects 0
   emit_wgmimic_required_sysctl "$file" net.ipv6.conf.all.accept_source_route 0
   emit_wgmimic_required_sysctl "$file" net.ipv6.conf.default.accept_source_route 0
+  if [[ "$preserve_ra" == "yes" ]]; then
+    printf '# 默认 IPv6 路由依赖 RA；开启 IPv6 forwarding 时保留 %s 接收 RA。\n' "$default_iface" >> "$file"
+    emit_wgmimic_required_sysctl "$file" "net.ipv6.conf.${default_iface}.accept_ra" 2
+  fi
 }
 
 apply_wgmimic_required_sysctl() {
@@ -1573,7 +1584,8 @@ if [[ "$ROLE" == "forwarding" || "$LANDING_ROUTES" == "yes" ]]; then
   emit_sysctl net.ipv6.conf.all.accept_source_route 0
   emit_sysctl net.ipv6.conf.default.accept_source_route 0
   if [[ "$IPV6_RA" == "yes" ]]; then
-    printf '# IPv6 默认路由依赖 %s 的 RA：如需保留默认路由，请在接口级单独设置 accept_ra=2，不要写到 all/default。\n' "$DEFAULT_IFACE" >> "$SYSCTL_OUT"
+    printf '# IPv6 默认路由依赖 %s 的 RA：开启 forwarding 时自动保留该接口接收 RA。\n' "$DEFAULT_IFACE" >> "$SYSCTL_OUT"
+    emit_sysctl "net.ipv6.conf.${DEFAULT_IFACE}.accept_ra" 2
   fi
 else
   printf '# 落地节点未启用 NAT/路由：不写 ip_forward/rp_filter，保留系统或其他服务自己的网络策略。\n' >> "$SYSCTL_OUT"
