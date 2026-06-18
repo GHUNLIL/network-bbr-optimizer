@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.18.2"
+VERSION="2026.06.18.3"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -244,7 +244,7 @@ show_summary() {
   infer_auto_topology
   printf '%s待生效配置草案%s\n' "$BOLD" "$RESET"
   printf '  说明            : 这里是你修改后的待生成/待应用配置，不是当前系统已生效值。\n'
-  printf '  角色/场景      : %s / %s\n' "$(role_label)" "$(scene_label)"
+  printf '  转发场景        : %s（默认角色：%s）\n' "$(scene_label)" "$(role_label)"
   printf '  固定策略        : %s / %s\n' "$(target_label)" "$(business_label)"
   printf '  带宽 Mbps      : 上行 %s / 下行 %s\n' "$UP_MBPS" "$DOWN_MBPS"
   printf '  RTT ms         : 上游 %s / 下游 %s\n' "$UP_RTT" "$DOWN_RTT"
@@ -349,15 +349,11 @@ clean_legacy_outputs() {
   [[ "$CLEAN_OUTPUTS" == "yes" ]] || pause_ui
 }
 
-edit_role_scene() {
+edit_scene() {
   banner
-  printf '%srole / scene 角色与转发场景%s\n' "$BOLD" "$RESET"
-  ROLE=$(ask_choice "role 机器角色" "$ROLE" forwarding landing)
-  if [[ "$ROLE" == "forwarding" ]]; then
-    SCENE=$(ask_choice "scene 转发场景" "${SCENE:-plain}" front ix relay international plain)
-  else
-    SCENE="landing"
-  fi
+  printf '%sscene 转发场景%s\n' "$BOLD" "$RESET"
+  ROLE="forwarding"
+  SCENE=$(ask_choice "scene 转发场景" "${SCENE:-plain}" front ix relay international plain)
   TARGET="speed"
   BUSINESS="mixed"
   infer_auto_topology
@@ -378,7 +374,7 @@ edit_link() {
 interactive_menu() {
   local choice key cursor=0 count=5 i answer
   local options=(
-    "role/scene - 角色、转发场景"
+    "scene - 转发场景"
     "bandwidth/RTT/loss - 链路带宽、延迟、丢包抖动"
     "generate/apply - 生成配置并确认是否应用"
     "live sysctl - 查看系统已生效参数"
@@ -418,7 +414,7 @@ interactive_menu() {
     fi
 
     case "$choice" in
-      1) edit_role_scene; DRAFT_DIRTY="yes" ;;
+      1) edit_scene; DRAFT_DIRTY="yes" ;;
       2) edit_link; DRAFT_DIRTY="yes" ;;
       3)
         if [[ "$DRAFT_DIRTY" == "yes" ]]; then
@@ -441,12 +437,8 @@ interactive_menu() {
 }
 
 linear_wizard() {
-  ROLE=$(ask_choice "role 机器角色" "$ROLE" forwarding landing)
-  if [[ "$ROLE" == "forwarding" ]]; then
-    SCENE=$(ask_choice "scene 转发场景" "$SCENE" front ix relay international plain)
-  else
-    SCENE="landing"
-  fi
+  ROLE="forwarding"
+  SCENE=$(ask_choice "scene 转发场景" "$SCENE" front ix relay international plain)
 
   TARGET="speed"
   BUSINESS="mixed"
@@ -476,12 +468,12 @@ usage() {
   cat <<'USAGE'
 Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
 
-交互式 Linux 网络优化脚本，面向极致专用转发节点和落地节点。
+交互式 Linux 网络优化脚本，默认面向转发/上网链路；建站只是兼容场景。
 固定策略为极致满速 + TCP+UDP 双优化 + 可控低抖动，不再询问容易误选的业务/目标/拓扑分支。
 
 用法:
   bash bbr.sh             # 上下键可视化菜单，先生成配置，再确认是否应用
-  bash bbr.sh --quick     # 精简问答模式，只问角色/场景和链路参数
+  bash bbr.sh --quick     # 精简问答模式，只问转发场景和链路参数
   bash bbr.sh --dry-run   # 只生成配置文件，不应用
   bash bbr.sh --apply     # 生成后默认询问应用
   bash bbr.sh --wgmimic-required  # 只生成/应用 WG/Mimic 必需 sysctl
@@ -1705,7 +1697,7 @@ cat > "$REPORT_OUT" <<EOF
 脚本版本=$VERSION
 
 [输入和选择]
-角色=$(role_label)
+默认角色=$(role_label)
 场景=$(scene_label)
 上行_Mbps=$UP_MBPS
 下行_Mbps=$DOWN_MBPS

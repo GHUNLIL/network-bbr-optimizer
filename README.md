@@ -1,6 +1,6 @@
 # 中文 BBR 网络优化脚本（Network BBR Optimizer）
 
-中文交互式 Linux BBR 与网络转发优化脚本，面向专用转发节点、IX 专线转发、线路中继、国际互联转发和落地节点。
+中文交互式 Linux BBR 与网络转发优化脚本，默认面向专用转发节点、IX 专线转发、线路中继、国际互联转发和上网链路；建站机器也可使用，但建站不是主要优化目标。
 
 固定目标是“极致满速 + TCP+UDP 双优化 + 可控低抖动”：让测速、新连接和长 RTT 链路尽快跑满，同时限制队列深度，避免无意义堆积。脚本会生成并可应用 BBR、sysctl、RPS、conntrack、nofile、TCP Fast Open 等配置；应用层 mux/smux/yamux/multiplex 默认不会开启。
 
@@ -10,13 +10,13 @@
 
 应用新版配置时，脚本会停用旧版安装可能残留的 `initcwnd-enforcer.timer`。这个旧定时器会定期改默认路由窗口；新版会停用它并清理旧 route 窗口，让系统恢复自适应。
 
-conntrack 会区分连接上限和 hash 表大小：`nf_conntrack_max` 仍按机器角色、带宽、会话量和内存预算计算，`hashsize` 会按连接上限约 `1/8` 写入。这样可以避免某些内核在 `nf_conntrack` 模块加载时，把运行态连接上限自动膨胀到脚本目标值的数倍。
+conntrack 会区分连接上限和 hash 表大小：`nf_conntrack_max` 仍按默认转发画像、转发场景、带宽、会话量和内存预算计算，`hashsize` 会按连接上限约 `1/8` 写入。这样可以避免某些内核在 `nf_conntrack` 模块加载时，把运行态连接上限自动膨胀到脚本目标值的数倍。
 
-会话表并发强度默认自动判断：脚本会按角色、场景、带宽、内存、CPU 核心和 RX 队列判断 `balanced/high/extreme`。中高带宽的状态转发前置/IX 机器会自动提升到 `high`，但 `extreme` 必须同时满足千兆以上、8GiB 以上内存、至少 4 核和 4 条 RX 队列，避免 2 核小机器被误当作大型 IX 汇聚节点。`high` 会提高 conntrack、nofile、listen backlog、SYN backlog、TIME_WAIT 和 netdev 队列容量，`extreme` 更激进但仍受内存、CPU 和队列保护。
+会话表并发强度默认自动判断：脚本会按转发场景、带宽、内存、CPU 核心和 RX 队列判断 `balanced/high/extreme`。中高带宽的状态转发前置/IX 机器会自动提升到 `high`，但 `extreme` 必须同时满足千兆以上、8GiB 以上内存、至少 4 核和 4 条 RX 队列，避免 2 核小机器被误当作大型 IX 汇聚节点。`high` 会提高 conntrack、nofile、listen backlog、SYN backlog、TIME_WAIT 和 netdev 队列容量，`extreme` 更激进但仍受内存、CPU 和队列保护。
 
 IX 场景的 `netdev_max_backlog` 与 `nf_conntrack_max` 现在有资源封顶：2 核/2 队列的几百 Mbps IX 转发机默认不会再生成 `netdev_max_backlog=1048576` 或 `nf_conntrack_max=8388608` 这类过深队列/过大会话表；只有多核、多 RX 队列、千兆以上的大汇聚节点才会逐级放宽。
 
-`stateful`、落地路由、多出口/策略路由、IPv6 RA、本机是否终止 TCP 这些容易误选的拓扑项也会自动推断：脚本会结合角色/场景、当前默认路由、策略路由、NAT/TProxy 规则、隧道接口、IPv6 `proto ra` 默认路由和公开 TCP 监听端口判断，并在应用后的报告里列出判断依据。
+`stateful`、落地路由、多出口/策略路由、IPv6 RA、本机是否终止 TCP 这些容易误选的拓扑项也会自动推断：脚本会结合转发场景、当前默认路由、策略路由、NAT/TProxy 规则、隧道接口、IPv6 `proto ra` 默认路由和公开 TCP 监听端口判断，并在应用后的报告里列出判断依据。
 
 如果检测到 IPv6 默认路由依赖 RA，脚本在开启 IPv6 forwarding 时会自动给默认网卡写 `accept_ra=2`，避免转发模式下内核停止接收 RA 后丢失 IPv6 默认路由。静态 IPv6 默认路由机器不会写这个接口项。
 
@@ -62,7 +62,7 @@ sudo ./bbr.sh
 
 ```bash
 bash bbr.sh                 # 上下键可视化菜单
-bash bbr.sh --quick         # 精简问答模式，只问角色/场景和链路参数
+bash bbr.sh --quick         # 精简问答模式，只问转发场景和链路参数
 bash bbr.sh --dry-run       # 只生成配置，不应用
 bash bbr.sh --apply         # 生成配置，并询问是否应用
 bash bbr.sh --wgmimic-required # 只应用 WG/Mimic 必需 sysctl
@@ -73,9 +73,9 @@ bash bbr.sh --help          # 查看帮助
 
 ## 菜单变化
 
-打开脚本时，主界面优先显示“系统已生效参数”，也就是从当前机器实时读取到的内核配置。修改角色/场景或链路参数后，界面才会切换为“待生效配置草案”，避免把脚本默认值误认为系统当前值。
+打开脚本时，主界面优先显示“系统已生效参数”，也就是从当前机器实时读取到的内核配置。修改转发场景或链路参数后，界面才会切换为“待生效配置草案”，避免把脚本默认值误认为系统当前值。
 
-交互界面不再询问“优化目标”“业务类型”“BBR 版本假设”“stateful”“多出口/策略路由”“IPv6 RA”“落地路由”这些容易误选的分支；脚本固定使用极致满速、`TCP+UDP 双优化` 和 BBR 自动/未知公式。RPS、TFO、busy_poll、会话表并发强度、TCP/UDP/CPS 容量都会在“生成配置并确认是否应用”时按角色、场景、带宽、RTT、内存、CPU、网卡队列和当前路由/防火墙状态自动判断。
+交互界面不再询问“机器角色”“优化目标”“业务类型”“BBR 版本假设”“stateful”“多出口/策略路由”“IPv6 RA”“落地路由”这些容易误选的分支；脚本默认按转发节点处理，固定使用极致满速、`TCP+UDP 双优化` 和 BBR 自动/未知公式。RPS、TFO、busy_poll、会话表并发强度、TCP/UDP/CPS 容量都会在“生成配置并确认是否应用”时按转发场景、带宽、RTT、内存、CPU、网卡队列和当前路由/防火墙状态自动判断。
 
 界面会保留 `BBR`、`TFO`、`RPS`、`nftables`、`conntrack`、`sysctl`、`busy_poll` 等英文技术术语，但自动项不再单独占主菜单。
 
@@ -83,7 +83,7 @@ bash bbr.sh --help          # 查看帮助
 
 `--wgmimic-required` 是给 WireGuard + Mimic 隧道的一键最小配置：只开启 IPv4/IPv6 转发、关闭 rp_filter、关闭 redirects/source route 等会影响隧道路由的项目，不会改 BBR、队列、RPS 或 conntrack 容量。完整加速仍走普通生成/应用流程。
 
-应用完成后，脚本会打印一段“本次输入、自动选择和生成参数报告”，里面包含你输入的角色/场景/带宽/RTT/丢包抖动、脚本自动判断的 stateful/落地路由/多出口/IPv6 RA/RPS/TFO/busy_poll/会话表强度和判断依据，以及最终生成的核心参数。报告也会列出哪些项目已交回系统自适应，可以整段复制给 Codex 检查是否合理。
+应用完成后，脚本会打印一段“本次输入、自动选择和生成参数报告”，里面包含你输入的转发场景/带宽/RTT/丢包抖动、脚本自动判断的 stateful/落地路由/多出口/IPv6 RA/RPS/TFO/busy_poll/会话表强度和判断依据，以及最终生成的核心参数。报告也会列出哪些项目已交回系统自适应，可以整段复制给 Codex 检查是否合理。
 
 ## 输出目录
 
@@ -119,12 +119,11 @@ $HOME/.local/state/network-bbr-optimizer/latest-backup
 bash bbr.sh --out-dir /root/bbr-output
 ```
 
-## 角色说明
+## 默认画像说明
 
-- 转发节点：包括前置入口、IX 专线、线路中继、国际互联和普通 nftables 转发。
-- 落地节点：默认指 3x-ui、Xray、GOST 等应用层出口机器。
-- 纯转发节点不会默认开启 TCP Fast Open，因为 nftables 内核转发不终止 TCP 连接，单边开启 TFO 对被转发连接没有实际帮助。
-- 落地节点会自动检测现有 forwarding、NAT/TProxy 规则和隧道接口；只有机器同时承担 NAT、路由或 nftables 转发时才会按路由出口处理。
+- 脚本默认按转发节点优化，包括前置入口、IX 专线、线路中继、国际互联和普通 nftables 转发。
+- 纯转发场景不会默认开启 TCP Fast Open，因为 nftables 内核转发不终止 TCP 连接，单边开启 TFO 对被转发连接没有实际帮助。
+- 建站或应用层服务机器也可以使用，但不是主要优化目标；这类机器的公开 TCP 监听、NAT/TProxy、隧道接口和现有 forwarding 状态会作为自动判断依据。
 - 脚本会在应用实时配置前生成回滚文件。
 - BBR1/未知内核都会尝试启用 `bbr` 拥塞控制；脚本不再全局强写 ECN，保留内核默认策略和对端协商。
 
