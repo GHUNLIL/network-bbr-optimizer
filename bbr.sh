@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.20.1"
+VERSION="2026.06.20.2"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -34,6 +34,10 @@ OUT_DIR_AUTO="no"
 CLEAN_OUTPUTS="no"
 DRAFT_DIRTY="no"
 WGMIMIC_REQUIRED_ONLY="no"
+CHINA_WHITELIST_ONLY="no"
+CHINA_WHITELIST_RAW_BASE="${CHINA_WHITELIST_RAW_BASE:-https://raw.githubusercontent.com/GHUNLIL/china-region-whitelist/main}"
+CHINA_WHITELIST_ENTRYPOINT="${CHINA_WHITELIST_ENTRYPOINT:-bootstrap.sh}"
+GITHUB_PROXY_PREFIX="${GITHUB_PROXY_PREFIX:-${BBR_GITHUB_PROXY_URL:-https://gh-proxy.com/}}"
 
 log() { printf '[*] %s\n' "$*"; }
 warn() { printf '[!] %s\n' "$*" >&2; }
@@ -196,6 +200,81 @@ banner() {
   printf '固定策略: 游戏低延迟 + UDP 实时优先 + 可控吞吐 | 默认不启用应用层 mux\n'
   printf '术语: BBR/TFO/RPS/nftables/conntrack/sysctl 保留英文；选项内附中文备注\n'
   hr
+}
+
+github_proxy_url() {
+  local raw_url="$1" proxy="$2"
+  case "$proxy" in
+    ""|direct|none)
+      printf '%s\n' "$raw_url"
+      ;;
+    */)
+      printf '%s%s\n' "$proxy" "$raw_url"
+      ;;
+    *)
+      printf '%s/%s\n' "$proxy" "$raw_url"
+      ;;
+  esac
+}
+
+china_whitelist_proxy_candidates() {
+  local candidates mode
+  candidates="${CHINA_WHITELIST_GITHUB_PROXIES:-${CN_GITHUB_PROXIES:-${BBR_GITHUB_PROXIES:-}}}"
+  if [[ -n "$candidates" ]]; then
+    printf '%s\n' "${candidates//,/ }"
+    return 0
+  fi
+
+  mode="${CHINA_WHITELIST_GITHUB_PROXY:-${CN_GITHUB_PROXY:-${BBR_GITHUB_PROXY:-auto}}}"
+  case "$mode" in
+    ""|auto)
+      printf '%s direct\n' "$GITHUB_PROXY_PREFIX"
+      ;;
+    direct|none|0|no|NO|No|false|FALSE|False|off|OFF|Off)
+      printf 'direct\n'
+      ;;
+    1|yes|YES|Yes|true|TRUE|True|on|ON|On|force)
+      printf '%s direct\n' "$GITHUB_PROXY_PREFIX"
+      ;;
+    *)
+      printf '%s direct\n' "$mode"
+      ;;
+  esac
+}
+
+run_china_region_whitelist() {
+  local pause_after="${1:-yes}" tmp proxy url status
+  banner
+  printf '%schina-region-whitelist / 中国地区白名单%s\n' "$BOLD" "$RESET"
+  printf '将拉取并运行 GHUNLIL/china-region-whitelist 的 %s。\n' "$CHINA_WHITELIST_ENTRYPOINT"
+  printf '默认代理优先，失败会尝试直连；可用 CHINA_WHITELIST_GITHUB_PROXY=direct 强制直连。\n\n'
+
+  command -v curl >/dev/null 2>&1 || die "缺少 curl，无法拉取 china-region-whitelist。"
+  command -v mktemp >/dev/null 2>&1 || die "缺少 mktemp，无法创建临时文件。"
+  tmp="$(mktemp "/tmp/china-region-whitelist.XXXXXX")" || die "mktemp 失败"
+
+  for proxy in $(china_whitelist_proxy_candidates); do
+    url="$(github_proxy_url "${CHINA_WHITELIST_RAW_BASE%/}/${CHINA_WHITELIST_ENTRYPOINT}" "$proxy")"
+    log "正在下载：$url"
+    if curl -fL --connect-timeout 15 --max-time 120 --retry 2 --retry-delay 1 -o "$tmp" "$url"; then
+      chmod +x "$tmp"
+      set +e
+      CN_GITHUB_PROXY="${CN_GITHUB_PROXY:-$proxy}" \
+        GITHUB_PROXY_PREFIX="$GITHUB_PROXY_PREFIX" \
+        bash "$tmp"
+      status=$?
+      set -e
+      rm -f "$tmp"
+      [[ "$pause_after" == "yes" ]] && pause_ui
+      return "$status"
+    fi
+    warn "下载失败，尝试下一个地址。"
+  done
+
+  rm -f "$tmp"
+  warn "无法下载 china-region-whitelist，请检查网络或设置 CHINA_WHITELIST_GITHUB_PROXY=https://gh-proxy.com/"
+  [[ "$pause_after" == "yes" ]] && pause_ui
+  return 1
 }
 
 yn_label() {
@@ -371,12 +450,13 @@ edit_link() {
 }
 
 interactive_menu() {
-  local choice key cursor=0 count=5 i answer
+  local choice key cursor=0 count=6 i answer
   local options=(
     "scene - 转发场景"
     "bandwidth/RTT/loss - 链路带宽、延迟、丢包抖动"
     "generate/apply - 生成配置并确认是否应用"
     "live sysctl - 查看系统已生效参数"
+    "china-region-whitelist - 拉取中国地区白名单"
     "exit - 退出"
   )
   tput civis 2>/dev/null || true
@@ -388,7 +468,7 @@ interactive_menu() {
       show_live_status_body
     fi
     hr
-    printf '%s↑/↓ 或 j/k 选择，Enter 确认；也可按 1-5，q 退出%s\n\n' "$DIM" "$RESET"
+    printf '%s↑/↓ 或 j/k 选择，Enter 确认；也可按 1-6，q 退出%s\n\n' "$DIM" "$RESET"
     for ((i=0; i<count; i++)); do
       if (( i == cursor )); then
         printf '  %s> %d) %s%s\n' "$GREEN" $((i + 1)) "${options[$i]}" "$RESET"
@@ -403,7 +483,7 @@ interactive_menu() {
         $'\e[A'|$'\eOA'|k|K) cursor=$(((cursor + count - 1) % count)); continue ;;
         $'\e[B'|$'\eOB'|j|J) cursor=$(((cursor + 1) % count)); continue ;;
         ""|$'\r'|$'\n') choice=$((cursor + 1)) ;;
-        [1-5]) choice="$key"; cursor=$((choice - 1)) ;;
+        [1-6]) choice="$key"; cursor=$((choice - 1)) ;;
         q|Q) exit 0 ;;
         *) continue ;;
       esac
@@ -429,7 +509,8 @@ interactive_menu() {
         fi
         ;;
       4) show_live_status ;;
-      5|q|Q) exit 0 ;;
+      5) run_china_region_whitelist yes || true ;;
+      6|q|Q) exit 0 ;;
       *) warn "无效选择"; pause_ui ;;
     esac
   done
@@ -476,6 +557,7 @@ Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
   bash bbr.sh --dry-run   # 只生成配置文件，不应用
   bash bbr.sh --apply     # 生成后默认询问应用
   bash bbr.sh --wgmimic-required  # 只生成/应用 WG/Mimic 必需 sysctl
+  bash bbr.sh --china-whitelist   # 拉取并运行 china-region-whitelist
   bash bbr.sh --out-dir DIR       # 指定输出目录
   bash bbr.sh --clean-outputs     # 清理旧版 bbr-output-* 和 /root/network-optimize-backup-* 目录
   bash bbr.sh --help
@@ -507,6 +589,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run) APPLY_MODE="no" ;;
     --apply) APPLY_MODE="yes" ;;
     --wgmimic-required|--wgmimic-sysctl|--wg-mimic-sysctl) WGMIMIC_REQUIRED_ONLY="yes" ;;
+    --china-whitelist|--china-region-whitelist|--whitelist) CHINA_WHITELIST_ONLY="yes" ;;
     --out-dir)
       shift
       [[ $# -gt 0 ]] || die "--out-dir 需要指定输出目录"
@@ -1102,6 +1185,11 @@ STATE_DIR="$(default_state_dir)"
 if [[ "$WGMIMIC_REQUIRED_ONLY" == "yes" ]]; then
   apply_wgmimic_required_sysctl
   exit 0
+fi
+
+if [[ "$CHINA_WHITELIST_ONLY" == "yes" ]]; then
+  run_china_region_whitelist no
+  exit $?
 fi
 
 MEM_TOTAL_KB=$(mem_kb MemTotal)
