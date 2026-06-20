@@ -1,10 +1,10 @@
 # 中文 BBR 网络优化脚本（Network BBR Optimizer）
 
-中文交互式 Linux BBR 与网络转发优化脚本，默认面向专用转发节点、IX 专线转发、线路转发/国际互联和上网链路；建站机器也可使用，但建站不是主要优化目标。
+中文交互式 Linux BBR 与网络转发优化脚本，默认面向游戏/实时 UDP、转发节点和上网链路；专用转发、IX 专线、线路转发/国际互联仍可使用，但默认优先级是响应速度，其次保留转发能力，最后才追求跑满带宽。
 
-固定目标是“极致满速 + TCP+UDP 双优化 + 可控低抖动”：让测速、新连接和长 RTT 链路尽快跑满，同时限制队列深度，避免无意义堆积。脚本会生成并可应用 BBR、sysctl、RPS、conntrack、nofile、TCP Fast Open 等配置；应用层 mux/smux/yamux/multiplex 默认不会开启。
+固定目标是“游戏低延迟 + UDP 实时优先 + 可控吞吐”：负载下尽量少排队，让游戏包、语音包、SSH 和小请求优先保持响应；同时保留 BBR、内核转发、conntrack、rp_filter/IPv6 RA 处理等转发机需要的能力。应用层 mux/smux/yamux/multiplex 默认不会开启。
 
-默认业务按 `TCP+UDP 双优化` 处理，不只偏 TCP；UDP 会话、UDP socket 上限、netdev 队列、conntrack UDP 容量、短连接回收和常见 TCP 基础能力都会一起计算。
+默认业务按 `UDP 游戏/实时` 处理，不只偏 TCP；UDP socket 上限、conntrack UDP 容量、短连接回收和常见 TCP 基础能力都会一起计算，但 TCP 缓冲、`tcp_limit_output_bytes`、netdev backlog、RPS 自动开启条件会比重型转发模式更克制。
 
 新版默认更尊重内核自适应：TCP 协商能力、ECN、RTT/重排路径学习、route `initcwnd/initrwnd`、`txqueuelen`、socket 默认缓冲、keepalive 等不再硬写。脚本只清理旧版可能残留在默认路由上的 `initcwnd/initrwnd`，之后交给内核、驱动、BBR 和应用按实际路径自适应。
 
@@ -12,11 +12,11 @@
 
 conntrack 会区分连接上限和 hash 表大小：`nf_conntrack_max` 仍按默认转发画像、转发场景、带宽、会话量和内存预算计算，`hashsize` 会按连接上限约 `1/8` 写入。这样可以避免某些内核在 `nf_conntrack` 模块加载时，把运行态连接上限自动膨胀到脚本目标值的数倍。
 
-会话表并发强度默认自动判断：脚本会按转发场景、带宽、内存、CPU 核心和 RX 队列判断 `balanced/high/extreme`。中高带宽的状态转发前置/IX/线路转发机器会自动提升到 `high`，但 `extreme` 必须同时满足千兆以上、8GiB 以上内存、至少 4 核和 4 条 RX 队列，避免 2 核小机器被误当作大型 IX 汇聚节点。`high` 会提高 conntrack、nofile、listen backlog、SYN backlog、TIME_WAIT 和 netdev 队列容量，`extreme` 更激进但仍受内存、CPU 和队列保护。
+会话表并发强度默认保持 `balanced`：即使是转发节点，也先按低延迟游戏/实时流量处理，避免自动升到重型高并发画像后拉长队列。conntrack、nofile、listen backlog、SYN backlog、TIME_WAIT 和 netdev 队列仍会按带宽、内存、CPU、RX 队列和转发场景估算，但默认不为了测速吞吐主动放大到 `high/extreme`。
 
 `线路转发` 和 `国际互联` 在新版里合并为同一个场景：都代表跨境、长 RTT、WG/Mimic 或公网中继链路，不再给“国际互联”单独套更保守的低缓冲配置。旧版或外部脚本传入的 `international` 名称仍会兼容处理，但按 `relay` 线路转发参数计算。
 
-IX 场景的 `netdev_max_backlog` 与 `nf_conntrack_max` 现在有资源封顶：2 核/2 队列的几百 Mbps IX 转发机默认不会再生成 `netdev_max_backlog=1048576` 或 `nf_conntrack_max=8388608` 这类过深队列/过大会话表；只有多核、多 RX 队列、千兆以上的大汇聚节点才会逐级放宽。
+默认低延迟画像会收紧 `netdev_max_backlog` 与 TCP 发送队列：常见 1Gbps/80ms 输入下，TCP 缓冲上限会被压到 32MiB 内，`tcp_limit_output_bytes` 约 8MiB，`netdev_max_backlog` 通常约 32768，避免为了吞吐把小包压在长队列后面。
 
 `stateful`、落地路由、多出口/策略路由、IPv6 RA、本机是否终止 TCP 这些容易误选的拓扑项也会自动推断：脚本会结合转发场景、当前默认路由、策略路由、NAT/TProxy 规则、隧道接口、IPv6 `proto ra` 默认路由和公开 TCP 监听端口判断，并在应用后的报告里列出判断依据。
 
@@ -75,7 +75,7 @@ bash bbr.sh --help          # 查看帮助
 
 打开脚本时，主界面优先显示“系统已生效参数”，也就是从当前机器实时读取到的内核配置。修改转发场景或链路参数后，界面才会切换为“待生效配置草案”，避免把脚本默认值误认为系统当前值。
 
-交互界面不再询问“机器角色”“优化目标”“业务类型”“BBR 版本假设”“stateful”“多出口/策略路由”“IPv6 RA”“落地路由”这些容易误选的分支；脚本默认按转发节点处理，固定使用极致满速、`TCP+UDP 双优化` 和 BBR 自动/未知公式。RPS、TFO、busy_poll、会话表并发强度、TCP/UDP/CPS 容量都会在“生成配置并确认是否应用”时按转发场景、带宽、RTT、内存、CPU、网卡队列和当前路由/防火墙状态自动判断。
+交互界面不再询问“机器角色”“优化目标”“业务类型”“BBR 版本假设”“stateful”“多出口/策略路由”“IPv6 RA”“落地路由”这些容易误选的分支；脚本默认按转发节点处理，固定使用响应优先、`UDP 游戏/实时` 和 BBR 自动/未知公式。RPS、TFO、busy_poll、会话表并发强度、TCP/UDP/CPS 容量都会在“生成配置并确认是否应用”时按转发场景、带宽、RTT、内存、CPU、网卡队列和当前路由/防火墙状态自动判断。
 
 界面会保留 `BBR`、`TFO`、`RPS`、`nftables`、`conntrack`、`sysctl`、`busy_poll` 等英文技术术语，但自动项不再单独占主菜单。
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.18.4"
+VERSION="2026.06.20.1"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -17,7 +17,7 @@ AUTO_TCP_CAP=$((2047 * MIB))
 ROLE=""
 SCENE=""
 TARGET="speed"
-BUSINESS="mixed"
+BUSINESS="udp_game"
 CONCURRENCY_MODE="auto"
 STATEFUL="auto"
 LANDING_ROUTES="auto"
@@ -99,11 +99,11 @@ choice_label() {
     relay) printf 'relay 线路转发/国际互联 - 跨境、长 RTT、WG/Mimic 或公网中继' ;;
     international) printf 'international 国际互联 - 兼容旧选项，按 relay 线路转发计算' ;;
     plain) printf 'plain 普通 nftables 转发 - 通用内核转发画像' ;;
-    speed) printf 'speed 极致满速 - 新连接和测速尽快跑满，同时控制队列' ;;
+    speed) printf 'speed 响应优先 - 游戏/实时小包优先，兼顾起速' ;;
     throughput) printf 'throughput 极致吞吐 - 更偏大流量长时间持续吞吐' ;;
     mixed) printf 'mixed TCP+UDP 双优化 - 默认同时照顾 TCP 满速和 UDP 会话' ;;
     tcp) printf 'tcp TCP 长连接 - 长连接、代理隧道或大流量 TCP' ;;
-    udp_game) printf 'udp_game UDP 游戏/实时 - 游戏、语音、实时 UDP' ;;
+    udp_game) printf 'udp_game UDP 游戏/实时 - 游戏、语音、实时 UDP，默认低排队' ;;
     web) printf 'web Web/HTTPS - 网站、API、短连接 HTTPS' ;;
     balanced) printf 'balanced 均衡并发 - 按带宽/内存自动估算会话表' ;;
     high) printf 'high 高并发 - 提高 conntrack/nofile/backlog 容量' ;;
@@ -193,7 +193,7 @@ clear_ui() {
 banner() {
   clear_ui
   printf '%sNetwork BBR Optimizer / 中文 BBR 网络优化器%s  %s%s%s\n' "$BOLD" "$RESET" "$CYAN" "$VERSION" "$RESET"
-  printf '固定策略: 极致满速 + TCP+UDP 双优化 + 可控低抖动 | 默认不启用应用层 mux\n'
+  printf '固定策略: 游戏低延迟 + UDP 实时优先 + 可控吞吐 | 默认不启用应用层 mux\n'
   printf '术语: BBR/TFO/RPS/nftables/conntrack/sysctl 保留英文；选项内附中文备注\n'
   hr
 }
@@ -223,14 +223,14 @@ scene_label() {
 
 target_label() {
   case "${TARGET:-speed}" in
-    speed) printf '极致满速' ;;
+    speed) printf '响应优先' ;;
     throughput) printf '极致吞吐' ;;
     *) printf '%s' "$TARGET" ;;
   esac
 }
 
 business_label() {
-  case "${BUSINESS:-mixed}" in
+  case "${BUSINESS:-udp_game}" in
     mixed) printf 'TCP+UDP 双优化' ;;
     tcp) printf 'TCP 长连接' ;;
     udp_game) printf 'UDP 游戏/实时' ;;
@@ -354,7 +354,7 @@ edit_scene() {
   ROLE="forwarding"
   SCENE=$(ask_choice "scene 转发场景" "${SCENE:-plain}" front ix relay plain)
   TARGET="speed"
-  BUSINESS="mixed"
+  BUSINESS="udp_game"
   infer_auto_topology
 }
 
@@ -440,7 +440,7 @@ linear_wizard() {
   SCENE=$(ask_choice "scene 转发场景" "$SCENE" front ix relay plain)
 
   TARGET="speed"
-  BUSINESS="mixed"
+  BUSINESS="udp_game"
 
   UP_MBPS=$(to_int "$(ask "upload/ingress Mbps 上行/入口带宽" "$UP_MBPS")")
   DOWN_MBPS=$(to_int "$(ask "download/egress Mbps 下行/出口带宽" "$DOWN_MBPS")")
@@ -468,7 +468,7 @@ usage() {
 Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
 
 交互式 Linux 网络优化脚本，默认面向转发/上网链路；建站只是兼容场景。
-固定策略为极致满速 + TCP+UDP 双优化 + 可控低抖动，不再询问容易误选的业务/目标/拓扑分支。
+固定策略为游戏低延迟 + UDP 实时优先 + 可控吞吐，不再询问容易误选的业务/目标/拓扑分支。
 
 用法:
   bash bbr.sh             # 上下键可视化菜单，先生成配置，再确认是否应用
@@ -1116,7 +1116,7 @@ TX_QUEUES=$(count_queues "$DEFAULT_IFACE" tx)
 ROLE="forwarding"
 SCENE="plain"
 TARGET="speed"
-BUSINESS="mixed"
+BUSINESS="udp_game"
 CONCURRENCY_MODE="auto"
 STATEFUL="auto"
 LANDING_ROUTES="auto"
@@ -1206,8 +1206,10 @@ case "$BUSINESS" in
     CPS=$((CPS * 11 / 10))
     ;;
   udp_game)
-    UDP_SESSIONS=$((UDP_SESSIONS * 2))
-    CPS=$((CPS * 3 / 2))
+    TCP_CONNS=$((TCP_CONNS / 2))
+    UDP_SESSIONS=$((UDP_SESSIONS * 3 / 4))
+    CPS=$((CPS / 2))
+    MEM_PCT=$((MEM_PCT - 24))
     ;;
   web)
     UDP_SESSIONS=$((UDP_SESSIONS / 2))
@@ -1239,10 +1241,10 @@ CONCURRENCY_EFFECTIVE="$CONCURRENCY_MODE"
 LINK_MBPS_FOR_CONCURRENCY=$(max "$UP_MBPS" "$DOWN_MBPS")
 if [[ "$CONCURRENCY_EFFECTIVE" == "auto" ]]; then
   CONCURRENCY_EFFECTIVE="balanced"
-  if [[ "$ROLE" == "forwarding" && "$STATEFUL" == "yes" ]] && [[ "$SCENE" == "front" || "$SCENE" == "ix" || "$SCENE" == "relay" || "$SCENE" == "international" ]] && (( LINK_MBPS_FOR_CONCURRENCY >= 100 )) && (( MEM_TOTAL_KB >= 2048 * 1024 )); then
+  if [[ "$BUSINESS" != "udp_game" && "$ROLE" == "forwarding" && "$STATEFUL" == "yes" ]] && [[ "$SCENE" == "front" || "$SCENE" == "ix" || "$SCENE" == "relay" || "$SCENE" == "international" ]] && (( LINK_MBPS_FOR_CONCURRENCY >= 100 )) && (( MEM_TOTAL_KB >= 2048 * 1024 )); then
     CONCURRENCY_EFFECTIVE="high"
   fi
-  if [[ "$ROLE" == "forwarding" && "$STATEFUL" == "yes" && "$SCENE" == "ix" ]] \
+  if [[ "$BUSINESS" != "udp_game" && "$ROLE" == "forwarding" && "$STATEFUL" == "yes" && "$SCENE" == "ix" ]] \
      && (( LINK_MBPS_FOR_CONCURRENCY >= 1000 )) \
      && (( MEM_TOTAL_KB >= 8192 * 1024 )) \
      && (( CPU_COUNT >= 4 )) \
@@ -1267,7 +1269,11 @@ case "$CONCURRENCY_EFFECTIVE" in
 esac
 
 MEM_PCT=$((MEM_PCT + 14))
-MEM_PCT=$(clamp "$MEM_PCT" 35 78)
+if [[ "$BUSINESS" == "udp_game" ]]; then
+  MEM_PCT=$(clamp "$MEM_PCT" 20 48)
+else
+  MEM_PCT=$(clamp "$MEM_PCT" 35 78)
+fi
 if (( MEM_TOTAL_KB < 1024 * 1024 )); then
   MEM_PCT=$(clamp "$MEM_PCT" 1 25)
 elif (( MEM_TOTAL_KB < 2048 * 1024 )); then
@@ -1284,33 +1290,52 @@ BDP=$(max "$UP_BDP" "$DOWN_BDP")
 MBW=$(max "$UP_MBPS" "$DOWN_MBPS")
 MAXRTT=$(max "$UP_RTT" "$DOWN_RTT")
 
-if [[ "$BBR_KIND" == "bbr3" ]]; then
+if [[ "$BUSINESS" == "udp_game" ]]; then
+  if [[ "$BBR_KIND" == "bbr3" ]]; then
+    BDP_MULT=3
+  else
+    BDP_MULT=4
+  fi
+elif [[ "$BBR_KIND" == "bbr3" ]]; then
   BDP_MULT=8
 else
   BDP_MULT=10
 fi
-BDP_MULT=$((BDP_MULT + 2))
-[[ "$BUSINESS" == "mixed" ]] && BDP_MULT=$((BDP_MULT + 1))
-[[ "$BUSINESS" == "udp_game" ]] && BDP_MULT=$((BDP_MULT + 1))
-(( LOSS_BP >= 100 )) && BDP_MULT=$((BDP_MULT + 1))
-(( LOSS_BP >= 300 )) && BDP_MULT=$((BDP_MULT + 1))
+if [[ "$BUSINESS" != "udp_game" ]]; then
+  BDP_MULT=$((BDP_MULT + 2))
+  [[ "$BUSINESS" == "mixed" ]] && BDP_MULT=$((BDP_MULT + 1))
+  (( LOSS_BP >= 100 )) && BDP_MULT=$((BDP_MULT + 1))
+  (( LOSS_BP >= 300 )) && BDP_MULT=$((BDP_MULT + 1))
+elif (( LOSS_BP >= 100 )); then
+  BDP_MULT=$((BDP_MULT + 1))
+fi
 JITTER_GUARD="no"
 if (( JITTER_MS > MAXRTT / 2 + 1 )); then
-  BDP_MULT=$((BDP_MULT + 1))
+  [[ "$BUSINESS" != "udp_game" ]] && BDP_MULT=$((BDP_MULT + 1))
   JITTER_GUARD="yes"
 fi
-if [[ "$SCENE" == "ix" ]] && (( LOSS_BP < 100 )); then
+if [[ "$BUSINESS" != "udp_game" && "$SCENE" == "ix" ]] && (( LOSS_BP < 100 )); then
   BDP_MULT=$((BDP_MULT + 2))
 fi
 if (( MANUAL_BDP_MULT > 0 )); then
   BDP_MULT="$MANUAL_BDP_MULT"
 fi
-BDP_MULT=$(clamp "$BDP_MULT" 2 16)
+if [[ "$BUSINESS" == "udp_game" ]]; then
+  BDP_MULT=$(clamp "$BDP_MULT" 2 6)
+else
+  BDP_MULT=$(clamp "$BDP_MULT" 2 16)
+fi
 if (( LOSS_BP >= 100 )) || [[ "$JITTER_GUARD" == "yes" ]] || [[ "$BUSINESS" == "udp_game" ]]; then
   QUEUE_JITTER_GUARD="yes"
-  BDP_MULT=$(min "$BDP_MULT" 12)
-  NETDEV_BACKLOG_CAP=524288
-  NETDEV_BUDGET_USECS_CAP=10000
+  if [[ "$BUSINESS" == "udp_game" ]]; then
+    BDP_MULT=$(min "$BDP_MULT" 6)
+    NETDEV_BACKLOG_CAP=65536
+    NETDEV_BUDGET_USECS_CAP=5000
+  else
+    BDP_MULT=$(min "$BDP_MULT" 12)
+    NETDEV_BACKLOG_CAP=524288
+    NETDEV_BUDGET_USECS_CAP=10000
+  fi
 else
   QUEUE_JITTER_GUARD="no"
   NETDEV_BACKLOG_CAP=1048576
@@ -1330,6 +1355,10 @@ fi
 if [[ "$QUEUE_JITTER_GUARD" == "yes" ]]; then
   NETDEV_RESOURCE_CAP=$(min "$NETDEV_RESOURCE_CAP" 262144)
 fi
+if [[ "$BUSINESS" == "udp_game" ]]; then
+  NETDEV_RESOURCE_CAP=$(min "$NETDEV_RESOURCE_CAP" 65536)
+  NETDEV_BACKLOG_CAP=$(min "$NETDEV_BACKLOG_CAP" 65536)
+fi
 NETDEV_BACKLOG_CAP=$(min "$NETDEV_BACKLOG_CAP" "$NETDEV_RESOURCE_CAP")
 
 ACTIVE_DIV_RAW=$((TCP_CONNS / 5000 + UDP_SESSIONS / 25000 + 4))
@@ -1346,6 +1375,9 @@ TCP_FLOOR=$((16 * MIB))
 if [[ "$ROLE" == "landing" && "$LANDING_ROUTES" != "yes" ]]; then
   TCP_FLOOR=$((8 * MIB))
 fi
+if [[ "$BUSINESS" == "udp_game" ]]; then
+  TCP_FLOOR=$((8 * MIB))
+fi
 if (( MEM_TOTAL_KB < 768 * 1024 )); then
   TCP_FLOOR=$((8 * MIB))
 fi
@@ -1354,6 +1386,9 @@ if (( MANUAL_TCP_CAP_MB > 0 )); then
   HARD_CAP=$((MANUAL_TCP_CAP_MB * MIB))
 else
   HARD_CAP=$(min "$AUTO_TCP_CAP" "$MEM_CAP")
+  if [[ "$BUSINESS" == "udp_game" ]]; then
+    HARD_CAP=$(min "$HARD_CAP" $((32 * MIB)))
+  fi
 fi
 HARD_CAP=$(max "$HARD_CAP" "$TCP_FLOOR")
 DESIRED=$((BDP * BDP_MULT))
@@ -1419,9 +1454,14 @@ TCP_LIMIT_FACTOR=6
 [[ "$TARGET" == "throughput" ]] && TCP_LIMIT_FACTOR=8
 if [[ "$SCENE" == "ix" && "$LOSS_BP" -lt 50 ]]; then TCP_LIMIT_FACTOR=8; fi
 if (( LOSS_BP >= 100 )) || [[ "$QUEUE_JITTER_GUARD" == "yes" ]]; then TCP_LIMIT_FACTOR=4; fi
-if [[ "$BUSINESS" == "udp_game" ]]; then TCP_LIMIT_FACTOR=3; fi
+LIMIT_LOWER="$MIB"
 LIMIT_UPPER=$(clamp $((TCP_MAX / 2)) $((4 * MIB)) $((64 * MIB)))
-TCP_LIMIT=$(clamp $((BDP * TCP_LIMIT_FACTOR)) "$MIB" "$LIMIT_UPPER")
+if [[ "$BUSINESS" == "udp_game" ]]; then
+  TCP_LIMIT_FACTOR=1
+  LIMIT_LOWER=$((512 * 1024))
+  LIMIT_UPPER=$(clamp $((TCP_MAX / 4)) $((4 * MIB)) $((8 * MIB)))
+fi
+TCP_LIMIT=$(clamp $((BDP * TCP_LIMIT_FACTOR)) "$LIMIT_LOWER" "$LIMIT_UPPER")
 
 SOMAXCONN=$(pow2ceil "$(clamp $((CPS * 4 + TCP_CONNS / 16)) 4096 1048576)")
 SYN_BACKLOG=$(pow2ceil "$(clamp $((CPS * 8 + TCP_CONNS / 8)) 8192 1048576)")
@@ -1438,7 +1478,7 @@ NETDEV_RAW=$((NETDEV_RAW * 15 / 10))
 [[ "$SCENE" == "ix" ]] && NETDEV_RAW=$((NETDEV_RAW * 2))
 [[ "$TARGET" == "throughput" ]] && NETDEV_RAW=$((NETDEV_RAW * 15 / 10))
 [[ "$BUSINESS" == "mixed" ]] && NETDEV_RAW=$((NETDEV_RAW + UDP_SESSIONS / 6))
-[[ "$BUSINESS" == "udp_game" ]] && NETDEV_RAW=$((NETDEV_RAW + UDP_SESSIONS / 3))
+[[ "$BUSINESS" == "udp_game" ]] && NETDEV_RAW=$((MBW * 8 + CPS * 4 + UDP_SESSIONS / 16))
 NETDEV_BACKLOG=$(pow2ceil "$(clamp "$NETDEV_RAW" 4096 "$NETDEV_BACKLOG_CAP")")
 
 CT_NEEDED="no"
@@ -1448,7 +1488,7 @@ CT_RAW=$((TCP_CONNS + UDP_SESSIONS * 2 + CPS * 90))
 [[ "$SCENE" == "ix" ]] && CT_RAW=$((CT_RAW * 15 / 10))
 [[ "$TARGET" == "throughput" ]] && CT_RAW=$((CT_RAW * 125 / 100))
 [[ "$BUSINESS" == "mixed" ]] && CT_RAW=$((CT_RAW + UDP_SESSIONS / 2))
-[[ "$BUSINESS" == "udp_game" ]] && CT_RAW=$((CT_RAW + UDP_SESSIONS))
+[[ "$BUSINESS" == "udp_game" ]] && CT_RAW=$((CT_RAW + UDP_SESSIONS / 4))
 CT_MEM_CAP=$((MEM_TOTAL_BYTES * MEM_PCT / 100 / 512))
 CT_UPPER=$(min 16777216 "$(max 131072 "$CT_MEM_CAP")")
 CT_RESOURCE_CAP=1048576
@@ -1485,7 +1525,11 @@ NETDEV_BUDGET_USECS=$(clamp 10000 1 "$NETDEV_BUDGET_USECS_CAP")
 [[ "$TARGET" == "throughput" ]] && NETDEV_BUDGET_USECS=$(clamp 12000 1 "$NETDEV_BUDGET_USECS_CAP")
 
 RPS_ENABLE="no"
-if (( RX_QUEUES < CPU_COUNT && CPU_COUNT >= 2 )); then
+if [[ "$BUSINESS" == "udp_game" ]]; then
+  if (( RX_QUEUES < CPU_COUNT && CPU_COUNT >= 4 && MBW >= 1000 )); then
+    RPS_ENABLE="yes"
+  fi
+elif (( RX_QUEUES < CPU_COUNT && CPU_COUNT >= 2 )); then
   RPS_ENABLE="yes"
 fi
 RPS_ENTRIES=$(clamp "$FLOW_LIMIT" 32768 2097152)
