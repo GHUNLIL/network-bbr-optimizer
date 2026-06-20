@@ -26,36 +26,50 @@ conntrack 会区分连接上限和 hash 表大小：`nf_conntrack_max` 仍按默
 
 ## 一键运行
 
-推荐使用 `bash <(curl -fsSL ...)` 运行。这样脚本内容来自 GitHub Raw，但交互菜单仍然能从终端读取输入；不要用 `curl ... | bash`，管道可能占用标准输入，导致上下键菜单显示不完整或无法选择。
+推荐使用 `bootstrap.sh` 入口运行。入口会自动下载最新版 `bbr.sh` 并执行；默认 `auto` 模式会识别中国大陆网络，大陆服务器优先走 GitHub 代理，非大陆服务器优先直连，失败会自动换下一个地址。
+
+仍然推荐 `bash <(curl -fsSL ...)`，不要用 `curl ... | bash`。进程替换可以让交互菜单继续从终端读取输入，管道可能占用标准输入，导致上下键菜单显示不完整或无法选择。
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bbr.sh)
+bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh)
 ```
 
 进入精简问答模式：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bbr.sh) --quick
+bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --quick
 ```
 
 只生成配置、不应用到系统：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bbr.sh) --dry-run
+bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --dry-run
 ```
 
 只应用 WireGuard/Mimic 隧道必需的 sysctl，不做 BBR、RPS、队列、conntrack 大优化：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bbr.sh) --wgmimic-required
+bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --wgmimic-required
+```
+
+强制直连 GitHub：
+
+```bash
+BBR_GITHUB_PROXY=direct bash <(curl -fsSL https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh)
+```
+
+手动指定其他 GitHub 代理：
+
+```bash
+BBR_GITHUB_PROXY=https://gh-proxy.com/ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh)
 ```
 
 ## 保存后运行
 
 ```bash
-curl -fL https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bbr.sh -o bbr.sh
-chmod +x bbr.sh
-if [ "$(id -u)" -eq 0 ]; then bash ./bbr.sh; else sudo bash ./bbr.sh; fi
+curl -fL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh -o bootstrap.sh
+chmod +x bootstrap.sh
+if [ "$(id -u)" -eq 0 ]; then bash ./bootstrap.sh; else sudo bash ./bootstrap.sh; fi
 ```
 
 ## 运行模式
