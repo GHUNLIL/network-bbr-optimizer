@@ -46,6 +46,18 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL
 bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --dry-run
 ```
 
+只读观测 softnet/UDP/TCP/conntrack 压力信号，不修改系统：
+
+```bash
+bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --audit 30
+```
+
+生成配置前先观测 30 秒，并把观测 delta 写入 `report.txt`：
+
+```bash
+bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --with-audit 30 --dry-run
+```
+
 只应用 WireGuard/Mimic 隧道必需的 sysctl，不做 BBR、RPS、队列、conntrack 大优化：
 
 ```bash
@@ -85,6 +97,8 @@ bash bbr.sh                 # 上下键可视化菜单
 bash bbr.sh --quick         # 精简问答模式，只问转发场景和链路参数
 bash bbr.sh --dry-run       # 只生成配置，不应用
 bash bbr.sh --apply         # 生成配置，并询问是否应用
+bash bbr.sh --audit 30      # 只读观测 30 秒，不生成、不应用配置
+bash bbr.sh --with-audit 30 # 生成配置前先观测，并写入 report.txt
 bash bbr.sh --wgmimic-required # 只应用 WG/Mimic 必需 sysctl
 bash bbr.sh --china-whitelist  # 拉取并运行 china-region-whitelist
 bash bbr.sh --out-dir DIR   # 指定输出目录
@@ -105,6 +119,8 @@ bash bbr.sh --help          # 查看帮助
 `--wgmimic-required` 是给 WireGuard + Mimic 隧道的一键最小配置：只开启 IPv4/IPv6 转发、关闭 rp_filter、关闭 redirects/source route 等会影响隧道路由的项目，不会改 BBR、队列、RPS 或 conntrack 容量。完整加速仍走普通生成/应用流程。
 
 应用完成后，脚本会打印一段“本次输入、自动选择和生成参数报告”，里面包含你输入的转发场景/带宽/RTT/丢包抖动、脚本自动判断的 stateful/落地路由/多出口/IPv6 RA/RPS/TFO/busy_poll/会话表强度和判断依据，以及最终生成的核心参数。报告也会列出哪些项目已交回系统自适应，可以整段复制给 Codex 检查是否合理。
+
+`--audit` / `--with-audit` 会按 bpftune 的观测驱动思路读取内核计数器：`/proc/net/softnet_stat`、`/proc/net/snmp`、`/proc/net/netstat`、`/proc/net/sockstat`、conntrack 当前使用量和邻居表数量。它只做前后采样 delta，不写 sysctl、不改 systemd、不加载模块；适合判断是否真的存在 backlog 丢包、NAPI budget 不足、UDP 缓冲错误、TCP listen backlog 溢出或 conntrack 接近满表。
 
 ## 输出目录
 

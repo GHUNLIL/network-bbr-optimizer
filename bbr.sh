@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.20.2"
+VERSION="2026.06.27.1"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -35,6 +35,21 @@ CLEAN_OUTPUTS="no"
 DRAFT_DIRTY="no"
 WGMIMIC_REQUIRED_ONLY="no"
 CHINA_WHITELIST_ONLY="no"
+AUDIT_MODE="off"
+AUDIT_SECONDS="${BBR_AUDIT_SECONDS:-30}"
+AUDIT_REPORT_OUT=""
+AUDIT_SECONDS_EFFECTIVE="未运行"
+AUDIT_SOFTNET_DROPPED_DELTA=0
+AUDIT_SOFTNET_SQUEEZED_DELTA=0
+AUDIT_UDP_RCVBUF_ERRORS_DELTA=0
+AUDIT_UDP_SNDBUF_ERRORS_DELTA=0
+AUDIT_UDP_IN_ERRORS_DELTA=0
+AUDIT_TCP_RETRANS_DELTA=0
+AUDIT_LISTEN_DROPS_DELTA=0
+AUDIT_LISTEN_OVERFLOWS_DELTA=0
+AUDIT_CONNTRACK_COUNT=0
+AUDIT_CONNTRACK_MAX=0
+AUDIT_CONNTRACK_PCT=0
 CHINA_WHITELIST_RAW_BASE="${CHINA_WHITELIST_RAW_BASE:-https://raw.githubusercontent.com/GHUNLIL/china-region-whitelist/main}"
 CHINA_WHITELIST_ENTRYPOINT="${CHINA_WHITELIST_ENTRYPOINT:-bootstrap.sh}"
 GITHUB_PROXY_PREFIX="${GITHUB_PROXY_PREFIX:-${BBR_GITHUB_PROXY_URL:-https://gh-proxy.com/}}"
@@ -380,6 +395,237 @@ show_live_status() {
   pause_ui
 }
 
+read_file_number() {
+  local path="$1" value
+  if [[ -r "$path" ]]; then
+    value="$(tr -dc '0-9' < "$path" 2>/dev/null || true)"
+    [[ -n "$value" ]] && printf '%s' "$value" && return
+  fi
+  printf '0'
+}
+
+counter_delta() {
+  local before="${1:-0}" after="${2:-0}"
+  [[ "$before" =~ ^[0-9]+$ ]] || before=0
+  [[ "$after" =~ ^[0-9]+$ ]] || after=0
+  if (( after >= before )); then
+    printf '%s' $((after - before))
+  else
+    printf '0'
+  fi
+}
+
+softnet_snapshot() {
+  local processed=0 dropped=0 squeezed=0 f1 f2 f3 rest
+  if [[ -r /proc/net/softnet_stat ]]; then
+    while read -r f1 f2 f3 rest; do
+      [[ -n "${f1:-}" && -n "${f2:-}" && -n "${f3:-}" ]] || continue
+      processed=$((processed + 16#$f1))
+      dropped=$((dropped + 16#$f2))
+      squeezed=$((squeezed + 16#$f3))
+    done < /proc/net/softnet_stat
+  fi
+  printf '%s %s %s\n' "$processed" "$dropped" "$squeezed"
+}
+
+proc_counter() {
+  local file="$1" section="$2" key="$3"
+  [[ -r "$file" ]] || { printf '0'; return; }
+  awk -v section="${section}:" -v key="$key" '
+    $1 == section && !have_header {
+      for (i = 2; i <= NF; i++) idx[$i] = i
+      have_header = 1
+      next
+    }
+    $1 == section && have_header {
+      if (key in idx) {
+        print $(idx[key])
+        found = 1
+        exit
+      }
+    }
+    END { if (!found) print 0 }
+  ' "$file"
+}
+
+sockstat_value() {
+  local file="$1" section="$2" key="$3"
+  [[ -r "$file" ]] || { printf '0'; return; }
+  awk -v section="${section}:" -v key="$key" '
+    $1 == section {
+      for (i = 2; i < NF; i += 2) {
+        if ($i == key) {
+          print $(i + 1)
+          found = 1
+          exit
+        }
+      }
+    }
+    END { if (!found) print 0 }
+  ' "$file"
+}
+
+neigh_entry_count() {
+  command -v ip >/dev/null 2>&1 || { printf '0'; return; }
+  { ip neigh show nud all 2>/dev/null || true; ip -6 neigh show nud all 2>/dev/null || true; } | awk 'END { print NR + 0 }'
+}
+
+audit_sample_seconds() {
+  local seconds
+  seconds="$(to_int "${AUDIT_SECONDS:-30}")"
+  clamp "$seconds" 1 300
+}
+
+write_observability_audit() {
+  local report="$1" seconds="$2" print_report="${3:-yes}" iface
+  local sd0 st0 sd1 st1
+  local udp_rcv0 udp_snd0 udp_in0 udp_noport0 udp_rcv1 udp_snd1 udp_in1 udp_noport1
+  local tcp_retrans0 tcp_passive0 tcp_retrans1 tcp_passive1
+  local listen_drop0 listen_over0 listen_drop1 listen_over1
+  local sync_sent0 sync_recv0 sync_fail0 sync_sent1 sync_recv1 sync_fail1
+  local nf_count nf_max nf_pct tcp_mem udp_mem sockets_used neigh_count
+  local softnet_drop_delta softnet_squeeze_delta udp_rcv_delta udp_snd_delta udp_in_delta udp_noport_delta
+  local tcp_retrans_delta listen_drop_delta listen_over_delta sync_fail_delta
+
+  seconds="$(clamp "$(to_int "$seconds")" 1 300)"
+  iface="${DEFAULT_IFACE:-$(detect_default_iface)}"
+  iface="${iface:-unknown}"
+
+  log "audit/observe 采样 ${seconds}s：只读取内核计数器，不修改系统。"
+
+  read -r _ sd0 st0 <<< "$(softnet_snapshot)"
+  udp_rcv0="$(proc_counter /proc/net/snmp Udp RcvbufErrors)"
+  udp_snd0="$(proc_counter /proc/net/snmp Udp SndbufErrors)"
+  udp_in0="$(proc_counter /proc/net/snmp Udp InErrors)"
+  udp_noport0="$(proc_counter /proc/net/snmp Udp NoPorts)"
+  tcp_retrans0="$(proc_counter /proc/net/snmp Tcp RetransSegs)"
+  tcp_passive0="$(proc_counter /proc/net/snmp Tcp PassiveOpens)"
+  listen_drop0="$(proc_counter /proc/net/netstat TcpExt ListenDrops)"
+  listen_over0="$(proc_counter /proc/net/netstat TcpExt ListenOverflows)"
+  sync_sent0="$(proc_counter /proc/net/netstat TcpExt SyncookiesSent)"
+  sync_recv0="$(proc_counter /proc/net/netstat TcpExt SyncookiesRecv)"
+  sync_fail0="$(proc_counter /proc/net/netstat TcpExt SyncookiesFailed)"
+
+  sleep "$seconds"
+
+  read -r _ sd1 st1 <<< "$(softnet_snapshot)"
+  udp_rcv1="$(proc_counter /proc/net/snmp Udp RcvbufErrors)"
+  udp_snd1="$(proc_counter /proc/net/snmp Udp SndbufErrors)"
+  udp_in1="$(proc_counter /proc/net/snmp Udp InErrors)"
+  udp_noport1="$(proc_counter /proc/net/snmp Udp NoPorts)"
+  tcp_retrans1="$(proc_counter /proc/net/snmp Tcp RetransSegs)"
+  tcp_passive1="$(proc_counter /proc/net/snmp Tcp PassiveOpens)"
+  listen_drop1="$(proc_counter /proc/net/netstat TcpExt ListenDrops)"
+  listen_over1="$(proc_counter /proc/net/netstat TcpExt ListenOverflows)"
+  sync_sent1="$(proc_counter /proc/net/netstat TcpExt SyncookiesSent)"
+  sync_recv1="$(proc_counter /proc/net/netstat TcpExt SyncookiesRecv)"
+  sync_fail1="$(proc_counter /proc/net/netstat TcpExt SyncookiesFailed)"
+
+  softnet_drop_delta="$(counter_delta "$sd0" "$sd1")"
+  softnet_squeeze_delta="$(counter_delta "$st0" "$st1")"
+  udp_rcv_delta="$(counter_delta "$udp_rcv0" "$udp_rcv1")"
+  udp_snd_delta="$(counter_delta "$udp_snd0" "$udp_snd1")"
+  udp_in_delta="$(counter_delta "$udp_in0" "$udp_in1")"
+  udp_noport_delta="$(counter_delta "$udp_noport0" "$udp_noport1")"
+  tcp_retrans_delta="$(counter_delta "$tcp_retrans0" "$tcp_retrans1")"
+  listen_drop_delta="$(counter_delta "$listen_drop0" "$listen_drop1")"
+  listen_over_delta="$(counter_delta "$listen_over0" "$listen_over1")"
+  sync_fail_delta="$(counter_delta "$sync_fail0" "$sync_fail1")"
+
+  nf_count="$(read_file_number /proc/sys/net/netfilter/nf_conntrack_count)"
+  nf_max="$(read_file_number /proc/sys/net/netfilter/nf_conntrack_max)"
+  nf_pct=0
+  if (( nf_max > 0 )); then
+    nf_pct=$((nf_count * 100 / nf_max))
+  fi
+  tcp_mem="$(sockstat_value /proc/net/sockstat TCP mem)"
+  udp_mem="$(sockstat_value /proc/net/sockstat UDP mem)"
+  sockets_used="$(sockstat_value /proc/net/sockstat sockets used)"
+  neigh_count="$(neigh_entry_count)"
+
+  AUDIT_REPORT_OUT="$report"
+  AUDIT_SECONDS_EFFECTIVE="$seconds"
+  AUDIT_SOFTNET_DROPPED_DELTA="$softnet_drop_delta"
+  AUDIT_SOFTNET_SQUEEZED_DELTA="$softnet_squeeze_delta"
+  AUDIT_UDP_RCVBUF_ERRORS_DELTA="$udp_rcv_delta"
+  AUDIT_UDP_SNDBUF_ERRORS_DELTA="$udp_snd_delta"
+  AUDIT_UDP_IN_ERRORS_DELTA="$udp_in_delta"
+  AUDIT_TCP_RETRANS_DELTA="$tcp_retrans_delta"
+  AUDIT_LISTEN_DROPS_DELTA="$listen_drop_delta"
+  AUDIT_LISTEN_OVERFLOWS_DELTA="$listen_over_delta"
+  AUDIT_CONNTRACK_COUNT="$nf_count"
+  AUDIT_CONNTRACK_MAX="$nf_max"
+  AUDIT_CONNTRACK_PCT="$nf_pct"
+
+  {
+    printf 'Network BBR Optimizer audit/observe\n'
+    printf '====================================\n'
+    printf '生成时间_UTC=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf '脚本版本=%s\n' "$VERSION"
+    printf '采样秒数=%s\n' "$seconds"
+    printf '默认网卡=%s\n\n' "$iface"
+
+    printf '[采样期增量]\n'
+    printf 'softnet_dropped_delta=%s\n' "$softnet_drop_delta"
+    printf 'softnet_time_squeezed_delta=%s\n' "$softnet_squeeze_delta"
+    printf 'udp_rcvbuf_errors_delta=%s\n' "$udp_rcv_delta"
+    printf 'udp_sndbuf_errors_delta=%s\n' "$udp_snd_delta"
+    printf 'udp_in_errors_delta=%s\n' "$udp_in_delta"
+    printf 'udp_no_ports_delta=%s\n' "$udp_noport_delta"
+    printf 'tcp_retrans_segs_delta=%s\n' "$tcp_retrans_delta"
+    printf 'tcp_passive_opens_delta=%s\n' "$(counter_delta "$tcp_passive0" "$tcp_passive1")"
+    printf 'tcp_listen_drops_delta=%s\n' "$listen_drop_delta"
+    printf 'tcp_listen_overflows_delta=%s\n' "$listen_over_delta"
+    printf 'syncookies_sent_delta=%s\n' "$(counter_delta "$sync_sent0" "$sync_sent1")"
+    printf 'syncookies_recv_delta=%s\n' "$(counter_delta "$sync_recv0" "$sync_recv1")"
+    printf 'syncookies_failed_delta=%s\n\n' "$sync_fail_delta"
+
+    printf '[当前容量]\n'
+    printf 'sockets_used=%s\n' "$sockets_used"
+    printf 'tcp_sockstat_mem_pages=%s\n' "$tcp_mem"
+    printf 'udp_sockstat_mem_pages=%s\n' "$udp_mem"
+    printf 'nf_conntrack_count=%s\n' "$nf_count"
+    printf 'nf_conntrack_max=%s\n' "$nf_max"
+    printf 'nf_conntrack_used_pct=%s\n' "$nf_pct"
+    printf 'neigh_entries_v4_v6=%s\n\n' "$neigh_count"
+
+    printf '[建议]\n'
+    local finding="no"
+    if (( softnet_drop_delta > 0 )); then
+      printf 'softnet_drop=发现收包 backlog 丢包，生成配置时应优先关注 netdev_max_backlog/RPS/RX 队列。\n'
+      finding="yes"
+    fi
+    if (( softnet_squeeze_delta > 0 )); then
+      printf 'softnet_time_squeezed=发现 NAPI 预算不足迹象，可关注 netdev_budget/netdev_budget_usecs，但要避免拉长调度等待。\n'
+      finding="yes"
+    fi
+    if (( udp_rcv_delta > 0 || udp_snd_delta > 0 || udp_in_delta > 0 )); then
+      printf 'udp_errors=发现 UDP 缓冲或输入错误增长，游戏/实时 UDP 场景应关注 udp_mem/rmem/wmem 与应用 socket 设置。\n'
+      finding="yes"
+    fi
+    if (( listen_drop_delta > 0 || listen_over_delta > 0 )); then
+      printf 'listen_backlog=发现 TCP 监听队列丢弃/溢出，本机终止 TCP 服务时应关注 somaxconn/tcp_max_syn_backlog/服务 backlog。\n'
+      finding="yes"
+    fi
+    if (( sync_fail_delta > 0 )); then
+      printf 'syncookies=发现无效 syncookie 增长，可能存在异常 SYN 流量；不要只靠盲目放大 backlog。\n'
+      finding="yes"
+    fi
+    if (( nf_max > 0 && nf_pct >= 80 )); then
+      printf 'conntrack=conntrack 使用率已达 %s%%，状态转发/NAT 场景应提高 nf_conntrack_max/hashsize 或缩短无效会话存活。\n' "$nf_pct"
+      finding="yes"
+    fi
+    if [[ "$finding" == "no" ]]; then
+      printf 'overall=采样期间未观察到明显 softnet/UDP/listen/conntrack 压力；建议保持低延迟保守参数，避免盲目放大队列。\n'
+    fi
+  } > "$report"
+
+  if [[ "$print_report" == "yes" ]]; then
+    printf '\n观测报告: %s\n' "$report"
+    sed -n '1,220p' "$report"
+  fi
+}
+
 default_state_dir() {
   if [[ -n "${XDG_STATE_HOME:-}" ]]; then
     printf '%s/network-bbr-optimizer' "$XDG_STATE_HOME"
@@ -556,6 +802,8 @@ Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
   bash bbr.sh --quick     # 精简问答模式，只问转发场景和链路参数
   bash bbr.sh --dry-run   # 只生成配置文件，不应用
   bash bbr.sh --apply     # 生成后默认询问应用
+  bash bbr.sh --audit [秒数]       # 只读观测 softnet/UDP/TCP/conntrack 等压力信号
+  bash bbr.sh --with-audit [秒数]  # 生成配置前先观测，并写入 report.txt
   bash bbr.sh --wgmimic-required  # 只生成/应用 WG/Mimic 必需 sysctl
   bash bbr.sh --china-whitelist   # 拉取并运行 china-region-whitelist
   bash bbr.sh --out-dir DIR       # 指定输出目录
@@ -572,6 +820,7 @@ Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
 
 默认不启用应用层 mux/multiplex。
 界面保留 BBR/TFO/RPS/nftables/conntrack/sysctl 等英文术语；stateful、多出口、IPv6 RA、RPS、TFO、busy_poll、会话表等自动项不再单独占主菜单。
+audit/observe 模式只读取系统计数器，不写 sysctl、不改 systemd、不加载模块。
 
 术语说明:
   BBR/BBR3: Linux TCP 拥塞控制算法名。
@@ -588,6 +837,20 @@ while [[ $# -gt 0 ]]; do
     --quick) UI_MODE="wizard" ;;
     --dry-run) APPLY_MODE="no" ;;
     --apply) APPLY_MODE="yes" ;;
+    --audit|--observe)
+      AUDIT_MODE="only"
+      if [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+        shift
+        AUDIT_SECONDS="$1"
+      fi
+      ;;
+    --with-audit|--audit-generate)
+      AUDIT_MODE="with"
+      if [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+        shift
+        AUDIT_SECONDS="$1"
+      fi
+      ;;
     --wgmimic-required|--wgmimic-sysctl|--wg-mimic-sysctl) WGMIMIC_REQUIRED_ONLY="yes" ;;
     --china-whitelist|--china-region-whitelist|--whitelist) CHINA_WHITELIST_ONLY="yes" ;;
     --out-dir)
@@ -1233,6 +1496,17 @@ MULTIPATH_REASON="等待自动推断"
 IPV6_RA_REASON="等待自动推断"
 LOCAL_TCP_TERMINATION_REASON="等待自动推断"
 
+if [[ "$AUDIT_MODE" == "only" ]]; then
+  if [[ -z "$OUT_DIR" ]]; then
+    OUT_DIR="$STATE_DIR/runs/${TS}-audit"
+    OUT_DIR_AUTO="yes"
+  fi
+  mkdir -p "$OUT_DIR" "$STATE_DIR" 2>/dev/null || true
+  ln -sfn "$OUT_DIR" "$STATE_DIR/latest" 2>/dev/null || true
+  write_observability_audit "$OUT_DIR/audit.txt" "$(audit_sample_seconds)" yes
+  exit 0
+fi
+
 if [[ "$UI_MODE" == "menu" ]] && has_tty; then
   interactive_menu
 else
@@ -1253,9 +1527,14 @@ MODULES_LOAD_OUT="$OUT_DIR/99-network-optimize-modules.conf"
 ROUTE_OUT="$OUT_DIR/network-optimize-route.sh"
 NIC_OUT="$OUT_DIR/network-optimize-nic.sh"
 REPORT_OUT="$OUT_DIR/report.txt"
+AUDIT_OUT="$OUT_DIR/audit.txt"
 
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 ln -sfn "$OUT_DIR" "$STATE_DIR/latest" 2>/dev/null || true
+
+if [[ "$AUDIT_MODE" == "with" ]]; then
+  write_observability_audit "$AUDIT_OUT" "$(audit_sample_seconds)" no
+fi
 
 printf 'Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh %s\n' "$VERSION"
 printf '输出目录: %s\n' "$OUT_DIR"
@@ -1869,6 +2148,22 @@ RPS单队列流表=$RPS_FLOW_CNT
 需要conntrack=$CT_NEEDED
 模块开机加载=tcp_bbr, sch_fq
 
+[观测信号]
+audit模式=$AUDIT_MODE
+audit采样秒数=$AUDIT_SECONDS_EFFECTIVE
+softnet_dropped_delta=$AUDIT_SOFTNET_DROPPED_DELTA
+softnet_time_squeezed_delta=$AUDIT_SOFTNET_SQUEEZED_DELTA
+udp_rcvbuf_errors_delta=$AUDIT_UDP_RCVBUF_ERRORS_DELTA
+udp_sndbuf_errors_delta=$AUDIT_UDP_SNDBUF_ERRORS_DELTA
+udp_in_errors_delta=$AUDIT_UDP_IN_ERRORS_DELTA
+tcp_retrans_segs_delta=$AUDIT_TCP_RETRANS_DELTA
+tcp_listen_drops_delta=$AUDIT_LISTEN_DROPS_DELTA
+tcp_listen_overflows_delta=$AUDIT_LISTEN_OVERFLOWS_DELTA
+nf_conntrack_count=$AUDIT_CONNTRACK_COUNT
+nf_conntrack_max=$AUDIT_CONNTRACK_MAX
+nf_conntrack_used_pct=$AUDIT_CONNTRACK_PCT
+audit报告=${AUDIT_REPORT_OUT:-未生成；可用 --with-audit 30}
+
 [生成的核心参数]
 TCP并发=$TCP_CONNS
 UDP会话=$UDP_SESSIONS
@@ -1907,6 +2202,7 @@ route=$ROUTE_OUT
 nic=$NIC_OUT
 modprobe=$MODPROBE_OUT
 modules_load=$MODULES_LOAD_OUT
+audit=${AUDIT_REPORT_OUT:-未生成}
 report=$REPORT_OUT
 rollback_apply后生成=$OUT_DIR/rollback.sh
 
@@ -1918,6 +2214,7 @@ EOF
 printf '\n已生成文件:\n'
 printf '  %s\n' "$SYSCTL_OUT" "$LIMITS_OUT" "$SYSTEMD_OUT" "$ROUTE_OUT" "$NIC_OUT" "$REPORT_OUT"
 printf '  %s\n' "$MODPROBE_OUT" "$MODULES_LOAD_OUT"
+[[ -n "$AUDIT_REPORT_OUT" ]] && printf '  %s\n' "$AUDIT_REPORT_OUT"
 [[ -n "${SERVICE_DROPIN:-}" ]] && printf '  %s\n' "$SERVICE_DROPIN"
 
 if [[ "$APPLY_MODE" == "no" ]]; then
