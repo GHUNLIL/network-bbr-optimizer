@@ -58,6 +58,12 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL
 bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --with-audit 30 --dry-run
 ```
 
+以 `oracle/bpftune` 为主导，只补转发/WG/Mimic/IPv6 RA 等 bpftune 不覆盖的缺口：
+
+```bash
+bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --bpftune-first --dry-run
+```
+
 只应用 WireGuard/Mimic 隧道必需的 sysctl，不做 BBR、RPS、队列、conntrack 大优化：
 
 ```bash
@@ -99,6 +105,7 @@ bash bbr.sh --dry-run       # 只生成配置，不应用
 bash bbr.sh --apply         # 生成配置，并询问是否应用
 bash bbr.sh --audit 30      # 只读观测 30 秒，不生成、不应用配置
 bash bbr.sh --with-audit 30 # 生成配置前先观测，并写入 report.txt
+bash bbr.sh --bpftune-first # bpftune 主导，只补拓扑/转发/WG/Mimic 缺口
 bash bbr.sh --wgmimic-required # 只应用 WG/Mimic 必需 sysctl
 bash bbr.sh --china-whitelist  # 拉取并运行 china-region-whitelist
 bash bbr.sh --out-dir DIR   # 指定输出目录
@@ -121,6 +128,29 @@ bash bbr.sh --help          # 查看帮助
 应用完成后，脚本会打印一段“本次输入、自动选择和生成参数报告”，里面包含你输入的转发场景/带宽/RTT/丢包抖动、脚本自动判断的 stateful/落地路由/多出口/IPv6 RA/RPS/TFO/busy_poll/会话表强度和判断依据，以及最终生成的核心参数。报告也会列出哪些项目已交回系统自适应，可以整段复制给 Codex 检查是否合理。
 
 `--audit` / `--with-audit` 会按 bpftune 的观测驱动思路读取内核计数器：`/proc/net/softnet_stat`、`/proc/net/snmp`、`/proc/net/netstat`、`/proc/net/sockstat`、conntrack 当前使用量和邻居表数量。它只做前后采样 delta，不写 sysctl、不改 systemd、不加载模块；适合判断是否真的存在 backlog 丢包、NAPI budget 不足、UDP 缓冲错误、TCP listen backlog 溢出或 conntrack 接近满表。
+
+## bpftune-first 方案
+
+`--bpftune-first` 是给想让 [oracle/bpftune](https://github.com/oracle/bpftune) 做主调优器的机器准备的模式。它会生成 `bpftune-first-report.txt` 和 `98-bpftune-first-bridge.conf`：
+
+- `bpftune` 负责动态性能调优：TCP/UDP buffer、netdev backlog/budget、邻居表、IP fragment、TCP congestion 连接级选择、sysctl 手动覆盖退让。
+- 本脚本只补 `bpftune` 不覆盖或不应该替你猜的拓扑项：IPv4/IPv6 forwarding、IPv6 RA 保留、`rp_filter`、redirect/source-route、WG/Mimic 隧道路由必需项。
+- 本模式故意不写 `tcp_rmem/tcp_wmem`、`rmem_max/wmem_max`、`netdev_max_backlog`、`netdev_budget`、`nf_conntrack_max`、`default_qdisc`、`tcp_congestion_control`，避免和 bpftune 的 tuner 抢控制权。
+
+推荐流程：
+
+```bash
+# 1. 先看机器是否有 bpftune 和 BPF 支持
+bash bbr.sh --bpftune-first --dry-run
+
+# 2. 如果报告合理，再应用补缺项；脚本会在检测到 bpftune 时尝试启动 bpftune.service
+sudo bash bbr.sh --bpftune-first --apply
+
+# 3. 之后用只读观测确认是否还有 UDP/backlog/conntrack 压力
+bash bbr.sh --audit 30
+```
+
+如果机器没有安装 bpftune，`--bpftune-first` 仍会生成补缺项和报告，但动态调优不会发生；这时可以继续使用普通完整模式，或先按你的发行版方式安装 bpftune。
 
 ## 输出目录
 

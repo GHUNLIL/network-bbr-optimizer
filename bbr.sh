@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.27.1"
+VERSION="2026.06.27.2"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -35,6 +35,7 @@ CLEAN_OUTPUTS="no"
 DRAFT_DIRTY="no"
 WGMIMIC_REQUIRED_ONLY="no"
 CHINA_WHITELIST_ONLY="no"
+BPFTUNE_FIRST_ONLY="no"
 AUDIT_MODE="off"
 AUDIT_SECONDS="${BBR_AUDIT_SECONDS:-30}"
 AUDIT_REPORT_OUT=""
@@ -804,6 +805,7 @@ Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
   bash bbr.sh --apply     # 生成后默认询问应用
   bash bbr.sh --audit [秒数]       # 只读观测 softnet/UDP/TCP/conntrack 等压力信号
   bash bbr.sh --with-audit [秒数]  # 生成配置前先观测，并写入 report.txt
+  bash bbr.sh --bpftune-first      # bpftune 主导，脚本只补转发/WG/Mimic/RA 等缺口
   bash bbr.sh --wgmimic-required  # 只生成/应用 WG/Mimic 必需 sysctl
   bash bbr.sh --china-whitelist   # 拉取并运行 china-region-whitelist
   bash bbr.sh --out-dir DIR       # 指定输出目录
@@ -821,6 +823,7 @@ Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
 默认不启用应用层 mux/multiplex。
 界面保留 BBR/TFO/RPS/nftables/conntrack/sysctl 等英文术语；stateful、多出口、IPv6 RA、RPS、TFO、busy_poll、会话表等自动项不再单独占主菜单。
 audit/observe 模式只读取系统计数器，不写 sysctl、不改 systemd、不加载模块。
+bpftune-first 模式不写 TCP/UDP buffer、netdev backlog/budget、BBR/qdisc 或 conntrack 容量，避免和 bpftune 动态 tuner 抢控制权。
 
 术语说明:
   BBR/BBR3: Linux TCP 拥塞控制算法名。
@@ -851,6 +854,7 @@ while [[ $# -gt 0 ]]; do
         AUDIT_SECONDS="$1"
       fi
       ;;
+    --bpftune-first|--bpftune-assist|--bpftune-bridge) BPFTUNE_FIRST_ONLY="yes" ;;
     --wgmimic-required|--wgmimic-sysctl|--wg-mimic-sysctl) WGMIMIC_REQUIRED_ONLY="yes" ;;
     --china-whitelist|--china-region-whitelist|--whitelist) CHINA_WHITELIST_ONLY="yes" ;;
     --out-dir)
@@ -1435,6 +1439,185 @@ apply_wgmimic_required_sysctl() {
   printf '备份目录: %s\n' "$backup_dir"
 }
 
+bpftune_support_probe() {
+  local out="$1" status=127
+  if command -v bpftune >/dev/null 2>&1; then
+    set +e
+    bpftune -S > "$out" 2>&1
+    status=$?
+    set -e
+  else
+    printf 'bpftune 未安装或不在 PATH 中。\n' > "$out"
+  fi
+  return "$status"
+}
+
+bpftune_service_state() {
+  command -v systemctl >/dev/null 2>&1 || { printf 'systemd unavailable'; return; }
+  if systemctl is-active --quiet bpftune.service 2>/dev/null; then
+    printf 'active'
+  elif systemctl is-enabled --quiet bpftune.service 2>/dev/null; then
+    printf 'enabled but inactive'
+  else
+    printf 'inactive or not installed'
+  fi
+}
+
+write_bpftune_first_sysctl_file() {
+  local file="$1" default_iface="${DEFAULT_IFACE:-}" preserve_ra="no"
+  [[ -n "$default_iface" ]] || default_iface="$(detect_default_iface)"
+  if [[ -n "$default_iface" ]]; then
+    DEFAULT_IFACE="$default_iface"
+    if ipv6_default_uses_ra || iface_accepts_ra; then
+      preserve_ra="yes"
+    fi
+  fi
+  : > "$file"
+  {
+    printf '# 由 bbr.sh %s 生成，时间: %s\n' "$VERSION" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf '# bpftune-first 补缺配置：让 bpftune 主导动态网络调优，本文件只处理转发/WG/Mimic/RA/路由安全缺口。\n'
+    printf '# 故意不写 BBR/qdisc、TCP/UDP buffer、netdev backlog/budget、conntrack 容量，避免和 bpftune tuner 抢控制权。\n\n'
+  } >> "$file"
+
+  emit_wgmimic_required_sysctl "$file" net.ipv4.ip_forward 1
+  emit_wgmimic_required_sysctl "$file" net.ipv6.conf.all.forwarding 1
+  emit_wgmimic_required_sysctl "$file" net.ipv6.conf.default.forwarding 1
+  emit_wgmimic_required_sysctl "$file" net.ipv4.conf.all.rp_filter 0
+  emit_wgmimic_required_sysctl "$file" net.ipv4.conf.default.rp_filter 0
+  emit_wgmimic_required_sysctl "$file" net.ipv4.conf.all.accept_source_route 0
+  emit_wgmimic_required_sysctl "$file" net.ipv4.conf.default.accept_source_route 0
+  emit_wgmimic_required_sysctl "$file" net.ipv4.conf.all.send_redirects 0
+  emit_wgmimic_required_sysctl "$file" net.ipv4.conf.default.send_redirects 0
+  emit_wgmimic_required_sysctl "$file" net.ipv4.conf.all.accept_redirects 0
+  emit_wgmimic_required_sysctl "$file" net.ipv4.conf.default.accept_redirects 0
+  emit_wgmimic_required_sysctl "$file" net.ipv6.conf.all.accept_redirects 0
+  emit_wgmimic_required_sysctl "$file" net.ipv6.conf.default.accept_redirects 0
+  emit_wgmimic_required_sysctl "$file" net.ipv6.conf.all.accept_source_route 0
+  emit_wgmimic_required_sysctl "$file" net.ipv6.conf.default.accept_source_route 0
+  if [[ "$preserve_ra" == "yes" ]]; then
+    printf '# 默认 IPv6 路由依赖 RA；开启 IPv6 forwarding 时保留 %s 接收 RA。\n' "$default_iface" >> "$file"
+    emit_wgmimic_required_sysctl "$file" "net.ipv6.conf.${default_iface}.accept_ra" 2
+  fi
+}
+
+write_bpftune_first_report() {
+  local report="$1" support_file="$2" support_status="$3" service_state="$4" sysctl_file="$5"
+  {
+    printf 'bpftune-first 方案报告\n'
+    printf '=====================\n'
+    printf '生成时间_UTC=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf '脚本版本=%s\n\n' "$VERSION"
+
+    printf '[方案]\n'
+    printf '主导者=oracle/bpftune\n'
+    printf '补缺者=GHUNLIL/network-bbr-optimizer\n'
+    printf '原则=bpftune 管动态性能 tuner；本脚本只补转发、WG/Mimic、IPv6 RA、rp_filter/redirect/source_route 等拓扑缺口。\n\n'
+
+    printf '[bpftune 状态]\n'
+    if command -v bpftune >/dev/null 2>&1; then
+      printf 'bpftune命令=%s\n' "$(command -v bpftune)"
+    else
+      printf 'bpftune命令=未安装或不在 PATH\n'
+    fi
+    printf 'bpftune支持探测退出码=%s\n' "$support_status"
+    printf 'bpftune服务状态=%s\n\n' "$service_state"
+
+    printf '[职责划分]\n'
+    printf 'bpftune负责=TCP/UDP buffer、netdev backlog/budget、邻居表、IP fragment、TCP congestion 连接级选择、sysctl 手动覆盖退让\n'
+    printf '本脚本负责=ip_forward、IPv6 forwarding、IPv6 RA 保留、rp_filter、redirect/source_route、WG/Mimic 隧道路由必需项\n'
+    printf '本脚本不负责=本模式不写 tcp_rmem/tcp_wmem/rmem_max/wmem_max/netdev_max_backlog/netdev_budget/nf_conntrack_max/default_qdisc/tcp_congestion_control\n\n'
+
+    printf '[生成文件]\n'
+    printf 'sysctl=%s\n' "$sysctl_file"
+    printf 'bpftune_support=%s\n\n' "$support_file"
+
+    printf '[bpftune -S 输出]\n'
+    sed -n '1,160p' "$support_file"
+  } > "$report"
+}
+
+maybe_start_bpftune_service() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+  command -v bpftune >/dev/null 2>&1 || return 0
+  if systemctl list-unit-files bpftune.service >/dev/null 2>&1; then
+    systemctl enable --now bpftune.service >/dev/null 2>&1 || warn "bpftune.service 启动失败；请查看 journalctl -u bpftune。"
+  fi
+}
+
+apply_bpftune_first_mode() {
+  local out_dir sysctl_out report_out support_out backup_dir do_apply support_status service_state
+  need_linux
+  if [[ -z "${STATE_DIR:-}" ]]; then
+    STATE_DIR="$(default_state_dir)"
+  fi
+  if [[ -z "${TS:-}" ]]; then
+    TS="$(date +%Y%m%d-%H%M%S)"
+  fi
+  if [[ -n "${OUT_DIR:-}" ]]; then
+    out_dir="$OUT_DIR"
+  else
+    out_dir="$STATE_DIR/runs/${TS}-bpftune-first"
+  fi
+  mkdir -p "$out_dir" "$STATE_DIR" 2>/dev/null || true
+  ln -sfn "$out_dir" "$STATE_DIR/latest" 2>/dev/null || true
+
+  sysctl_out="$out_dir/98-bpftune-first-bridge.conf"
+  report_out="$out_dir/bpftune-first-report.txt"
+  support_out="$out_dir/bpftune-support.txt"
+
+  write_bpftune_first_sysctl_file "$sysctl_out"
+  set +e
+  bpftune_support_probe "$support_out"
+  support_status=$?
+  set -e
+  service_state="$(bpftune_service_state)"
+  write_bpftune_first_report "$report_out" "$support_out" "$support_status" "$service_state" "$sysctl_out"
+
+  printf '\nbpftune-first 方案：\n'
+  sed -n '1,180p' "$report_out"
+  printf '\n补缺 sysctl：%s\n' "$sysctl_out"
+  sed -n '1,120p' "$sysctl_out"
+
+  if [[ "$APPLY_MODE" == "no" ]]; then
+    log "dry-run 模式：未应用。"
+    return 0
+  fi
+  if ! is_root; then
+    warn "当前不是 root，只生成方案和配置文件；如需应用请使用 sudo 重新运行。"
+    return 0
+  fi
+
+  if [[ "$APPLY_MODE" == "yes" ]]; then
+    do_apply="yes"
+  else
+    do_apply=$(ask_yes_no "现在应用 bpftune-first 补缺配置吗" "yes")
+  fi
+  [[ "$do_apply" == "yes" ]] || { log "未应用配置。"; return 0; }
+
+  backup_dir="$STATE_DIR/backups/${TS}-bpftune-first"
+  mkdir -p "$backup_dir"
+  ln -sfn "$backup_dir" "$STATE_DIR/latest-backup" 2>/dev/null || true
+  install_file "$sysctl_out" /etc/sysctl.d/98-bpftune-first-bridge.conf 0644 "$backup_dir"
+  sysctl --system
+  apply_generated_sysctl_live "$sysctl_out"
+
+  if command -v bpftune >/dev/null 2>&1; then
+    if [[ "$APPLY_MODE" == "yes" ]] || [[ "$(ask_yes_no "检测到 bpftune，是否尝试启用并启动 bpftune.service" "yes")" == "yes" ]]; then
+      maybe_start_bpftune_service
+    fi
+  else
+    warn "未检测到 bpftune；本模式已只应用补缺项，动态调优仍需你先安装 bpftune。"
+  fi
+
+  printf '\nbpftune-first 补缺配置已应用。关键状态：\n'
+  print_live_sysctl net.ipv4.ip_forward
+  print_live_sysctl net.ipv6.conf.all.forwarding
+  print_live_sysctl net.ipv4.conf.all.rp_filter
+  print_live_sysctl net.ipv4.conf.default.rp_filter
+  printf '报告: %s\n' "$report_out"
+  printf '备份目录: %s\n' "$backup_dir"
+}
+
 need_linux
 
 TS="$(date +%Y%m%d-%H%M%S)"
@@ -1453,6 +1636,11 @@ fi
 if [[ "$CHINA_WHITELIST_ONLY" == "yes" ]]; then
   run_china_region_whitelist no
   exit $?
+fi
+
+if [[ "$BPFTUNE_FIRST_ONLY" == "yes" ]]; then
+  apply_bpftune_first_mode
+  exit 0
 fi
 
 MEM_TOTAL_KB=$(mem_kb MemTotal)
