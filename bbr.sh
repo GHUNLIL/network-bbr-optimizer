@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.27.9"
+VERSION="2026.06.27.10"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -601,6 +601,102 @@ neigh_entry_count() {
   { ip neigh show nud all 2>/dev/null || true; ip -6 neigh show nud all 2>/dev/null || true; } | awk 'END { print NR + 0 }'
 }
 
+netdev_stat() {
+  local iface="$1" key="$2"
+  [[ -n "$iface" && "$iface" != "unknown" && -r /proc/net/dev ]] || { printf '0'; return; }
+  awk -v iface="$iface" -v key="$key" '
+    BEGIN {
+      n = split("rx_bytes rx_packets rx_errs rx_drop rx_fifo rx_frame rx_compressed rx_multicast tx_bytes tx_packets tx_errs tx_drop tx_fifo tx_colls tx_carrier tx_compressed", names, " ")
+      for (i = 1; i <= n; i++) idx[names[i]] = i + 1
+    }
+    {
+      gsub(":", " ")
+      if ($1 == iface && key in idx) {
+        print $(idx[key])
+        found = 1
+        exit
+      }
+    }
+    END { if (!found) print 0 }
+  ' /proc/net/dev
+}
+
+softirq_counter() {
+  local name="$1"
+  [[ -r /proc/softirqs ]] || { printf '0'; return; }
+  awk -v key="${name}:" '
+    $1 == key {
+      sum = 0
+      for (i = 2; i <= NF; i++) sum += $i
+      print sum
+      found = 1
+      exit
+    }
+    END { if (!found) print 0 }
+  ' /proc/softirqs
+}
+
+qdisc_counter() {
+  local iface="$1" metric="$2"
+  [[ -n "$iface" && "$iface" != "unknown" ]] || { printf '0'; return; }
+  command -v tc >/dev/null 2>&1 || { printf '0'; return; }
+  { tc -s qdisc show dev "$iface" 2>/dev/null || true; } | awk -v metric="$metric" '
+    {
+      for (i = 1; i <= NF; i++) {
+        if (metric == "dropped" && $i == "(dropped") {
+          value = $(i + 1)
+          gsub(/[^0-9]/, "", value)
+          sum += value
+        } else if (metric == "overlimits" && $i == "overlimits") {
+          value = $(i + 1)
+          gsub(/[^0-9]/, "", value)
+          sum += value
+        } else if (metric == "requeues" && $i == "requeues") {
+          value = $(i + 1)
+          gsub(/[^0-9]/, "", value)
+          sum += value
+        }
+      }
+    }
+    END { print sum + 0 }
+  '
+}
+
+qdisc_kind() {
+  local iface="$1"
+  [[ -n "$iface" && "$iface" != "unknown" ]] || { printf 'n/a'; return; }
+  command -v tc >/dev/null 2>&1 || { printf 'tc unavailable'; return; }
+  { tc qdisc show dev "$iface" 2>/dev/null || true; } | awk 'NR == 1 { print $2; found = 1; exit } END { if (!found) print "n/a" }'
+}
+
+legacy_disabled_state() {
+  local file
+  for file in /etc/sysctl.d/99-network-optimize.conf.disabled-by-bpftune-first*; do
+    if [[ -e "$file" ]]; then
+      printf '已存在'
+      return
+    fi
+  done
+  printf '无'
+}
+
+rate_mbps() {
+  local bytes="$1" seconds="$2"
+  awk -v bytes="$bytes" -v seconds="$seconds" 'BEGIN {
+    if (seconds > 0) printf "%.2f", bytes * 8 / seconds / 1000000
+    else printf "0.00"
+  }'
+}
+
+psi_compact() {
+  local name="$1" file="/proc/pressure/$1"
+  [[ -r "$file" ]] || { printf 'n/a'; return; }
+  awk '{
+    if (out != "") out = out "; "
+    out = out $0
+  } END { print out }' "$file"
+}
+
 audit_sample_seconds() {
   local seconds
   seconds="$(to_int "${AUDIT_SECONDS:-30}")"
@@ -611,31 +707,73 @@ write_observability_audit() {
   local report="$1" seconds="$2" print_report="${3:-yes}" iface
   local sd0 st0 sd1 st1
   local udp_rcv0 udp_snd0 udp_in0 udp_noport0 udp_rcv1 udp_snd1 udp_in1 udp_noport1
+  local udp_indgram0 udp_outdgram0 udp_indgram1 udp_outdgram1
   local tcp_retrans0 tcp_passive0 tcp_retrans1 tcp_passive1
+  local tcp_inerrs0 tcp_outrsts0 tcp_estabresets0 tcp_inerrs1 tcp_outrsts1 tcp_estabresets1
   local listen_drop0 listen_over0 listen_drop1 listen_over1
   local sync_sent0 sync_recv0 sync_fail0 sync_sent1 sync_recv1 sync_fail1
-  local nf_count nf_max nf_pct tcp_mem udp_mem sockets_used neigh_count
+  local tcp_timeout0 tcp_backlog_drop0 tcp_rcvq_drop0 tcp_reqq_drop0 tcp_abort_timeout0
+  local tcp_timeout1 tcp_backlog_drop1 tcp_rcvq_drop1 tcp_reqq_drop1 tcp_abort_timeout1
+  local ip_reasm_fail0 ip_frag_fail0 ip_in_discards0 ip_out_discards0 ip_reasm_fail1 ip_frag_fail1 ip_in_discards1 ip_out_discards1
+  local rx_bytes0 rx_packets0 rx_errs0 rx_drop0 tx_bytes0 tx_packets0 tx_errs0 tx_drop0
+  local rx_bytes1 rx_packets1 rx_errs1 rx_drop1 tx_bytes1 tx_packets1 tx_errs1 tx_drop1
+  local qdisc_drop0 qdisc_over0 qdisc_requeue0 qdisc_drop1 qdisc_over1 qdisc_requeue1
+  local softirq_rx0 softirq_tx0 softirq_rx1 softirq_tx1
+  local nf_count nf_max nf_pct tcp_mem udp_mem sockets_used neigh_count tcp_inuse tcp_tw tcp_orphan udp_inuse
   local softnet_drop_delta softnet_squeeze_delta udp_rcv_delta udp_snd_delta udp_in_delta udp_noport_delta
-  local tcp_retrans_delta listen_drop_delta listen_over_delta sync_fail_delta
+  local udp_indgram_delta udp_outdgram_delta tcp_retrans_delta listen_drop_delta listen_over_delta sync_fail_delta
+  local tcp_inerrs_delta tcp_outrsts_delta tcp_estabresets_delta tcp_timeout_delta tcp_backlog_drop_delta tcp_rcvq_drop_delta tcp_reqq_drop_delta tcp_abort_timeout_delta
+  local ip_reasm_fail_delta ip_frag_fail_delta ip_in_discards_delta ip_out_discards_delta
+  local rx_bytes_delta rx_packets_delta rx_errs_delta rx_drop_delta tx_bytes_delta tx_packets_delta tx_errs_delta tx_drop_delta
+  local qdisc_drop_delta qdisc_over_delta qdisc_requeue_delta softirq_rx_delta softirq_tx_delta
+  local qdisc_now cpu_psi memory_psi io_psi cc_now qdisc_sysctl_now tfo_now backlog_now budget_now budget_usecs_now rmem_max_now wmem_max_now
+  local bpftune_cmd bpftune_state classic_state bpftune_first_state old_disabled_state
 
   seconds="$(clamp "$(to_int "$seconds")" 1 300)"
   iface="${DEFAULT_IFACE:-$(detect_default_iface)}"
   iface="${iface:-unknown}"
 
-  log "audit/observe 采样 ${seconds}s：只读取内核计数器，不修改系统。"
+  log "audit/observe 全面体检采样 ${seconds}s：只读取内核计数器，不修改系统。"
 
   read -r _ sd0 st0 <<< "$(softnet_snapshot)"
   udp_rcv0="$(proc_counter /proc/net/snmp Udp RcvbufErrors)"
   udp_snd0="$(proc_counter /proc/net/snmp Udp SndbufErrors)"
   udp_in0="$(proc_counter /proc/net/snmp Udp InErrors)"
   udp_noport0="$(proc_counter /proc/net/snmp Udp NoPorts)"
+  udp_indgram0="$(proc_counter /proc/net/snmp Udp InDatagrams)"
+  udp_outdgram0="$(proc_counter /proc/net/snmp Udp OutDatagrams)"
   tcp_retrans0="$(proc_counter /proc/net/snmp Tcp RetransSegs)"
   tcp_passive0="$(proc_counter /proc/net/snmp Tcp PassiveOpens)"
+  tcp_inerrs0="$(proc_counter /proc/net/snmp Tcp InErrs)"
+  tcp_outrsts0="$(proc_counter /proc/net/snmp Tcp OutRsts)"
+  tcp_estabresets0="$(proc_counter /proc/net/snmp Tcp EstabResets)"
   listen_drop0="$(proc_counter /proc/net/netstat TcpExt ListenDrops)"
   listen_over0="$(proc_counter /proc/net/netstat TcpExt ListenOverflows)"
   sync_sent0="$(proc_counter /proc/net/netstat TcpExt SyncookiesSent)"
   sync_recv0="$(proc_counter /proc/net/netstat TcpExt SyncookiesRecv)"
   sync_fail0="$(proc_counter /proc/net/netstat TcpExt SyncookiesFailed)"
+  tcp_timeout0="$(proc_counter /proc/net/netstat TcpExt TCPTimeouts)"
+  tcp_backlog_drop0="$(proc_counter /proc/net/netstat TcpExt TCPBacklogDrop)"
+  tcp_rcvq_drop0="$(proc_counter /proc/net/netstat TcpExt TCPRcvQDrop)"
+  tcp_reqq_drop0="$(proc_counter /proc/net/netstat TcpExt TCPReqQFullDrop)"
+  tcp_abort_timeout0="$(proc_counter /proc/net/netstat TcpExt TCPAbortOnTimeout)"
+  ip_reasm_fail0="$(proc_counter /proc/net/snmp Ip ReasmFails)"
+  ip_frag_fail0="$(proc_counter /proc/net/snmp Ip FragFails)"
+  ip_in_discards0="$(proc_counter /proc/net/snmp Ip InDiscards)"
+  ip_out_discards0="$(proc_counter /proc/net/snmp Ip OutDiscards)"
+  rx_bytes0="$(netdev_stat "$iface" rx_bytes)"
+  rx_packets0="$(netdev_stat "$iface" rx_packets)"
+  rx_errs0="$(netdev_stat "$iface" rx_errs)"
+  rx_drop0="$(netdev_stat "$iface" rx_drop)"
+  tx_bytes0="$(netdev_stat "$iface" tx_bytes)"
+  tx_packets0="$(netdev_stat "$iface" tx_packets)"
+  tx_errs0="$(netdev_stat "$iface" tx_errs)"
+  tx_drop0="$(netdev_stat "$iface" tx_drop)"
+  qdisc_drop0="$(qdisc_counter "$iface" dropped)"
+  qdisc_over0="$(qdisc_counter "$iface" overlimits)"
+  qdisc_requeue0="$(qdisc_counter "$iface" requeues)"
+  softirq_rx0="$(softirq_counter NET_RX)"
+  softirq_tx0="$(softirq_counter NET_TX)"
 
   sleep "$seconds"
 
@@ -644,13 +782,40 @@ write_observability_audit() {
   udp_snd1="$(proc_counter /proc/net/snmp Udp SndbufErrors)"
   udp_in1="$(proc_counter /proc/net/snmp Udp InErrors)"
   udp_noport1="$(proc_counter /proc/net/snmp Udp NoPorts)"
+  udp_indgram1="$(proc_counter /proc/net/snmp Udp InDatagrams)"
+  udp_outdgram1="$(proc_counter /proc/net/snmp Udp OutDatagrams)"
   tcp_retrans1="$(proc_counter /proc/net/snmp Tcp RetransSegs)"
   tcp_passive1="$(proc_counter /proc/net/snmp Tcp PassiveOpens)"
+  tcp_inerrs1="$(proc_counter /proc/net/snmp Tcp InErrs)"
+  tcp_outrsts1="$(proc_counter /proc/net/snmp Tcp OutRsts)"
+  tcp_estabresets1="$(proc_counter /proc/net/snmp Tcp EstabResets)"
   listen_drop1="$(proc_counter /proc/net/netstat TcpExt ListenDrops)"
   listen_over1="$(proc_counter /proc/net/netstat TcpExt ListenOverflows)"
   sync_sent1="$(proc_counter /proc/net/netstat TcpExt SyncookiesSent)"
   sync_recv1="$(proc_counter /proc/net/netstat TcpExt SyncookiesRecv)"
   sync_fail1="$(proc_counter /proc/net/netstat TcpExt SyncookiesFailed)"
+  tcp_timeout1="$(proc_counter /proc/net/netstat TcpExt TCPTimeouts)"
+  tcp_backlog_drop1="$(proc_counter /proc/net/netstat TcpExt TCPBacklogDrop)"
+  tcp_rcvq_drop1="$(proc_counter /proc/net/netstat TcpExt TCPRcvQDrop)"
+  tcp_reqq_drop1="$(proc_counter /proc/net/netstat TcpExt TCPReqQFullDrop)"
+  tcp_abort_timeout1="$(proc_counter /proc/net/netstat TcpExt TCPAbortOnTimeout)"
+  ip_reasm_fail1="$(proc_counter /proc/net/snmp Ip ReasmFails)"
+  ip_frag_fail1="$(proc_counter /proc/net/snmp Ip FragFails)"
+  ip_in_discards1="$(proc_counter /proc/net/snmp Ip InDiscards)"
+  ip_out_discards1="$(proc_counter /proc/net/snmp Ip OutDiscards)"
+  rx_bytes1="$(netdev_stat "$iface" rx_bytes)"
+  rx_packets1="$(netdev_stat "$iface" rx_packets)"
+  rx_errs1="$(netdev_stat "$iface" rx_errs)"
+  rx_drop1="$(netdev_stat "$iface" rx_drop)"
+  tx_bytes1="$(netdev_stat "$iface" tx_bytes)"
+  tx_packets1="$(netdev_stat "$iface" tx_packets)"
+  tx_errs1="$(netdev_stat "$iface" tx_errs)"
+  tx_drop1="$(netdev_stat "$iface" tx_drop)"
+  qdisc_drop1="$(qdisc_counter "$iface" dropped)"
+  qdisc_over1="$(qdisc_counter "$iface" overlimits)"
+  qdisc_requeue1="$(qdisc_counter "$iface" requeues)"
+  softirq_rx1="$(softirq_counter NET_RX)"
+  softirq_tx1="$(softirq_counter NET_TX)"
 
   softnet_drop_delta="$(counter_delta "$sd0" "$sd1")"
   softnet_squeeze_delta="$(counter_delta "$st0" "$st1")"
@@ -658,10 +823,37 @@ write_observability_audit() {
   udp_snd_delta="$(counter_delta "$udp_snd0" "$udp_snd1")"
   udp_in_delta="$(counter_delta "$udp_in0" "$udp_in1")"
   udp_noport_delta="$(counter_delta "$udp_noport0" "$udp_noport1")"
+  udp_indgram_delta="$(counter_delta "$udp_indgram0" "$udp_indgram1")"
+  udp_outdgram_delta="$(counter_delta "$udp_outdgram0" "$udp_outdgram1")"
   tcp_retrans_delta="$(counter_delta "$tcp_retrans0" "$tcp_retrans1")"
   listen_drop_delta="$(counter_delta "$listen_drop0" "$listen_drop1")"
   listen_over_delta="$(counter_delta "$listen_over0" "$listen_over1")"
   sync_fail_delta="$(counter_delta "$sync_fail0" "$sync_fail1")"
+  tcp_inerrs_delta="$(counter_delta "$tcp_inerrs0" "$tcp_inerrs1")"
+  tcp_outrsts_delta="$(counter_delta "$tcp_outrsts0" "$tcp_outrsts1")"
+  tcp_estabresets_delta="$(counter_delta "$tcp_estabresets0" "$tcp_estabresets1")"
+  tcp_timeout_delta="$(counter_delta "$tcp_timeout0" "$tcp_timeout1")"
+  tcp_backlog_drop_delta="$(counter_delta "$tcp_backlog_drop0" "$tcp_backlog_drop1")"
+  tcp_rcvq_drop_delta="$(counter_delta "$tcp_rcvq_drop0" "$tcp_rcvq_drop1")"
+  tcp_reqq_drop_delta="$(counter_delta "$tcp_reqq_drop0" "$tcp_reqq_drop1")"
+  tcp_abort_timeout_delta="$(counter_delta "$tcp_abort_timeout0" "$tcp_abort_timeout1")"
+  ip_reasm_fail_delta="$(counter_delta "$ip_reasm_fail0" "$ip_reasm_fail1")"
+  ip_frag_fail_delta="$(counter_delta "$ip_frag_fail0" "$ip_frag_fail1")"
+  ip_in_discards_delta="$(counter_delta "$ip_in_discards0" "$ip_in_discards1")"
+  ip_out_discards_delta="$(counter_delta "$ip_out_discards0" "$ip_out_discards1")"
+  rx_bytes_delta="$(counter_delta "$rx_bytes0" "$rx_bytes1")"
+  rx_packets_delta="$(counter_delta "$rx_packets0" "$rx_packets1")"
+  rx_errs_delta="$(counter_delta "$rx_errs0" "$rx_errs1")"
+  rx_drop_delta="$(counter_delta "$rx_drop0" "$rx_drop1")"
+  tx_bytes_delta="$(counter_delta "$tx_bytes0" "$tx_bytes1")"
+  tx_packets_delta="$(counter_delta "$tx_packets0" "$tx_packets1")"
+  tx_errs_delta="$(counter_delta "$tx_errs0" "$tx_errs1")"
+  tx_drop_delta="$(counter_delta "$tx_drop0" "$tx_drop1")"
+  qdisc_drop_delta="$(counter_delta "$qdisc_drop0" "$qdisc_drop1")"
+  qdisc_over_delta="$(counter_delta "$qdisc_over0" "$qdisc_over1")"
+  qdisc_requeue_delta="$(counter_delta "$qdisc_requeue0" "$qdisc_requeue1")"
+  softirq_rx_delta="$(counter_delta "$softirq_rx0" "$softirq_rx1")"
+  softirq_tx_delta="$(counter_delta "$softirq_tx0" "$softirq_tx1")"
 
   nf_count="$(read_file_number /proc/sys/net/netfilter/nf_conntrack_count)"
   nf_max="$(read_file_number /proc/sys/net/netfilter/nf_conntrack_max)"
@@ -672,7 +864,33 @@ write_observability_audit() {
   tcp_mem="$(sockstat_value /proc/net/sockstat TCP mem)"
   udp_mem="$(sockstat_value /proc/net/sockstat UDP mem)"
   sockets_used="$(sockstat_value /proc/net/sockstat sockets used)"
+  tcp_inuse="$(sockstat_value /proc/net/sockstat TCP inuse)"
+  tcp_tw="$(sockstat_value /proc/net/sockstat TCP tw)"
+  tcp_orphan="$(sockstat_value /proc/net/sockstat TCP orphan)"
+  udp_inuse="$(sockstat_value /proc/net/sockstat UDP inuse)"
   neigh_count="$(neigh_entry_count)"
+  qdisc_now="$(qdisc_kind "$iface")"
+  cpu_psi="$(psi_compact cpu)"
+  memory_psi="$(psi_compact memory)"
+  io_psi="$(psi_compact io)"
+  cc_now="$(live_sysctl_value net.ipv4.tcp_congestion_control "n/a")"
+  qdisc_sysctl_now="$(live_sysctl_value net.core.default_qdisc "n/a")"
+  tfo_now="$(live_sysctl_value net.ipv4.tcp_fastopen "n/a")"
+  backlog_now="$(live_sysctl_value net.core.netdev_max_backlog "n/a")"
+  budget_now="$(live_sysctl_value net.core.netdev_budget "n/a")"
+  budget_usecs_now="$(live_sysctl_value net.core.netdev_budget_usecs "n/a")"
+  rmem_max_now="$(live_sysctl_value net.core.rmem_max "n/a")"
+  wmem_max_now="$(live_sysctl_value net.core.wmem_max "n/a")"
+  if command -v bpftune >/dev/null 2>&1; then
+    bpftune_cmd="$(command -v bpftune)"
+    bpftune_state="$(bpftune_service_state)"
+  else
+    bpftune_cmd="未安装"
+    bpftune_state="inactive or not installed"
+  fi
+  bpftune_first_state="$(config_file_state /etc/sysctl.d/98-bpftune-first-bridge.conf)"
+  classic_state="$(config_file_state /etc/sysctl.d/99-network-optimize.conf)"
+  old_disabled_state="$(legacy_disabled_state)"
 
   AUDIT_REPORT_OUT="$report"
   AUDIT_SECONDS_EFFECTIVE="$seconds"
@@ -696,23 +914,74 @@ write_observability_audit() {
     printf '采样秒数=%s\n' "$seconds"
     printf '默认网卡=%s\n\n' "$iface"
 
+    printf '[bpftune 与配置]\n'
+    printf 'bpftune命令=%s\n' "$bpftune_cmd"
+    printf 'bpftune服务=%s\n' "$bpftune_state"
+    printf 'bpftune-first配置=%s\n' "$bpftune_first_state"
+    printf '经典sysctl配置=%s\n' "$classic_state"
+    printf '经典sysctl禁用痕迹=%s\n\n' "$old_disabled_state"
+
+    printf '[关键系统参数]\n'
+    printf 'tcp_congestion_control=%s\n' "$cc_now"
+    printf 'default_qdisc=%s\n' "$qdisc_sysctl_now"
+    printf 'iface_qdisc=%s\n' "$qdisc_now"
+    printf 'tcp_fastopen=%s\n' "$tfo_now"
+    printf 'rmem_max=%s\n' "$rmem_max_now"
+    printf 'wmem_max=%s\n' "$wmem_max_now"
+    printf 'netdev_max_backlog=%s\n' "$backlog_now"
+    printf 'netdev_budget=%s\n' "$budget_now"
+    printf 'netdev_budget_usecs=%s\n\n' "$budget_usecs_now"
+
     printf '[采样期增量]\n'
+    printf 'rx_bytes_delta=%s\n' "$rx_bytes_delta"
+    printf 'tx_bytes_delta=%s\n' "$tx_bytes_delta"
+    printf 'rx_mbps_avg=%s\n' "$(rate_mbps "$rx_bytes_delta" "$seconds")"
+    printf 'tx_mbps_avg=%s\n' "$(rate_mbps "$tx_bytes_delta" "$seconds")"
+    printf 'rx_packets_delta=%s\n' "$rx_packets_delta"
+    printf 'tx_packets_delta=%s\n' "$tx_packets_delta"
+    printf 'rx_errors_delta=%s\n' "$rx_errs_delta"
+    printf 'tx_errors_delta=%s\n' "$tx_errs_delta"
+    printf 'rx_dropped_delta=%s\n' "$rx_drop_delta"
+    printf 'tx_dropped_delta=%s\n' "$tx_drop_delta"
+    printf 'qdisc_dropped_delta=%s\n' "$qdisc_drop_delta"
+    printf 'qdisc_overlimits_delta=%s\n' "$qdisc_over_delta"
+    printf 'qdisc_requeues_delta=%s\n' "$qdisc_requeue_delta"
     printf 'softnet_dropped_delta=%s\n' "$softnet_drop_delta"
     printf 'softnet_time_squeezed_delta=%s\n' "$softnet_squeeze_delta"
+    printf 'softirq_net_rx_delta=%s\n' "$softirq_rx_delta"
+    printf 'softirq_net_tx_delta=%s\n' "$softirq_tx_delta"
+    printf 'udp_in_datagrams_delta=%s\n' "$udp_indgram_delta"
+    printf 'udp_out_datagrams_delta=%s\n' "$udp_outdgram_delta"
     printf 'udp_rcvbuf_errors_delta=%s\n' "$udp_rcv_delta"
     printf 'udp_sndbuf_errors_delta=%s\n' "$udp_snd_delta"
     printf 'udp_in_errors_delta=%s\n' "$udp_in_delta"
     printf 'udp_no_ports_delta=%s\n' "$udp_noport_delta"
     printf 'tcp_retrans_segs_delta=%s\n' "$tcp_retrans_delta"
+    printf 'tcp_in_errors_delta=%s\n' "$tcp_inerrs_delta"
+    printf 'tcp_out_resets_delta=%s\n' "$tcp_outrsts_delta"
+    printf 'tcp_estab_resets_delta=%s\n' "$tcp_estabresets_delta"
+    printf 'tcp_timeouts_delta=%s\n' "$tcp_timeout_delta"
+    printf 'tcp_backlog_drop_delta=%s\n' "$tcp_backlog_drop_delta"
+    printf 'tcp_rcvq_drop_delta=%s\n' "$tcp_rcvq_drop_delta"
+    printf 'tcp_reqq_full_drop_delta=%s\n' "$tcp_reqq_drop_delta"
+    printf 'tcp_abort_on_timeout_delta=%s\n' "$tcp_abort_timeout_delta"
     printf 'tcp_passive_opens_delta=%s\n' "$(counter_delta "$tcp_passive0" "$tcp_passive1")"
     printf 'tcp_listen_drops_delta=%s\n' "$listen_drop_delta"
     printf 'tcp_listen_overflows_delta=%s\n' "$listen_over_delta"
     printf 'syncookies_sent_delta=%s\n' "$(counter_delta "$sync_sent0" "$sync_sent1")"
     printf 'syncookies_recv_delta=%s\n' "$(counter_delta "$sync_recv0" "$sync_recv1")"
-    printf 'syncookies_failed_delta=%s\n\n' "$sync_fail_delta"
+    printf 'syncookies_failed_delta=%s\n' "$sync_fail_delta"
+    printf 'ip_reasm_fails_delta=%s\n' "$ip_reasm_fail_delta"
+    printf 'ip_frag_fails_delta=%s\n' "$ip_frag_fail_delta"
+    printf 'ip_in_discards_delta=%s\n' "$ip_in_discards_delta"
+    printf 'ip_out_discards_delta=%s\n\n' "$ip_out_discards_delta"
 
     printf '[当前容量]\n'
     printf 'sockets_used=%s\n' "$sockets_used"
+    printf 'tcp_inuse=%s\n' "$tcp_inuse"
+    printf 'tcp_timewait=%s\n' "$tcp_tw"
+    printf 'tcp_orphan=%s\n' "$tcp_orphan"
+    printf 'udp_inuse=%s\n' "$udp_inuse"
     printf 'tcp_sockstat_mem_pages=%s\n' "$tcp_mem"
     printf 'udp_sockstat_mem_pages=%s\n' "$udp_mem"
     printf 'nf_conntrack_count=%s\n' "$nf_count"
@@ -720,34 +989,87 @@ write_observability_audit() {
     printf 'nf_conntrack_used_pct=%s\n' "$nf_pct"
     printf 'neigh_entries_v4_v6=%s\n\n' "$neigh_count"
 
-    printf '[建议]\n'
-    local finding="no"
+    printf '[系统压力 PSI]\n'
+    printf 'cpu=%s\n' "$cpu_psi"
+    printf 'memory=%s\n' "$memory_psi"
+    printf 'io=%s\n\n' "$io_psi"
+
+    printf '[风险结论]\n'
+    local finding="no" issue_count=0 risk_level="低"
+    if [[ "$classic_state" == "已写入" && "$bpftune_state" == "active" ]]; then
+      printf 'config_conflict=检测到 bpftune active 且旧经典 sysctl 仍写入，建议重新应用 bpftune-first 禁用旧 99-network-optimize.conf。\n'
+      finding="yes"
+      issue_count=$((issue_count + 1))
+    fi
+    if (( rx_errs_delta > 0 || tx_errs_delta > 0 )); then
+      printf 'iface_errors=网卡错误包增长 rx=%s tx=%s，优先检查宿主机/虚拟网卡/链路质量。\n' "$rx_errs_delta" "$tx_errs_delta"
+      finding="yes"
+      issue_count=$((issue_count + 1))
+    fi
+    if (( rx_drop_delta > 0 || tx_drop_delta > 0 || qdisc_drop_delta > 0 )); then
+      printf 'iface_or_qdisc_drops=接口/qdisc 丢包增长 rx=%s tx=%s qdisc=%s，应结合吞吐和延迟判断是否队列不足或出口拥塞。\n' "$rx_drop_delta" "$tx_drop_delta" "$qdisc_drop_delta"
+      finding="yes"
+      issue_count=$((issue_count + 1))
+    fi
     if (( softnet_drop_delta > 0 )); then
       printf 'softnet_drop=发现收包 backlog 丢包，生成配置时应优先关注 netdev_max_backlog/RPS/RX 队列。\n'
       finding="yes"
+      issue_count=$((issue_count + 1))
     fi
     if (( softnet_squeeze_delta > 0 )); then
       printf 'softnet_time_squeezed=发现 NAPI 预算不足迹象，可关注 netdev_budget/netdev_budget_usecs，但要避免拉长调度等待。\n'
       finding="yes"
+      issue_count=$((issue_count + 1))
     fi
     if (( udp_rcv_delta > 0 || udp_snd_delta > 0 || udp_in_delta > 0 )); then
       printf 'udp_errors=发现 UDP 缓冲或输入错误增长，游戏/实时 UDP 场景应关注 udp_mem/rmem/wmem 与应用 socket 设置。\n'
       finding="yes"
+      issue_count=$((issue_count + 1))
+    fi
+    if (( tcp_retrans_delta > 0 || tcp_timeout_delta > 0 || tcp_abort_timeout_delta > 0 )); then
+      printf 'tcp_loss_or_timeout=TCP 重传/超时增长 retrans=%s timeouts=%s abort_timeout=%s，可能是链路丢包、拥塞或队列过长。\n' "$tcp_retrans_delta" "$tcp_timeout_delta" "$tcp_abort_timeout_delta"
+      finding="yes"
+      issue_count=$((issue_count + 1))
+    fi
+    if (( tcp_backlog_drop_delta > 0 || tcp_rcvq_drop_delta > 0 || tcp_reqq_drop_delta > 0 )); then
+      printf 'tcp_queue_drop=TCP backlog/接收队列/请求队列丢包增长 backlog=%s rcvq=%s reqq=%s，本机服务场景应检查应用处理能力和 backlog。\n' "$tcp_backlog_drop_delta" "$tcp_rcvq_drop_delta" "$tcp_reqq_drop_delta"
+      finding="yes"
+      issue_count=$((issue_count + 1))
     fi
     if (( listen_drop_delta > 0 || listen_over_delta > 0 )); then
       printf 'listen_backlog=发现 TCP 监听队列丢弃/溢出，本机终止 TCP 服务时应关注 somaxconn/tcp_max_syn_backlog/服务 backlog。\n'
       finding="yes"
+      issue_count=$((issue_count + 1))
     fi
     if (( sync_fail_delta > 0 )); then
       printf 'syncookies=发现无效 syncookie 增长，可能存在异常 SYN 流量；不要只靠盲目放大 backlog。\n'
       finding="yes"
+      issue_count=$((issue_count + 1))
+    fi
+    if (( ip_reasm_fail_delta > 0 || ip_frag_fail_delta > 0 )); then
+      printf 'ip_fragment=IP 重组/分片失败增长 reasm=%s frag=%s，隧道/WG/Mimic 场景应检查 MTU/MSS。\n' "$ip_reasm_fail_delta" "$ip_frag_fail_delta"
+      finding="yes"
+      issue_count=$((issue_count + 1))
     fi
     if (( nf_max > 0 && nf_pct >= 80 )); then
       printf 'conntrack=conntrack 使用率已达 %s%%，状态转发/NAT 场景应提高 nf_conntrack_max/hashsize 或缩短无效会话存活。\n' "$nf_pct"
       finding="yes"
+      issue_count=$((issue_count + 1))
+    fi
+    if (( qdisc_over_delta > 0 )); then
+      printf 'qdisc_overlimits=qdisc overlimits 增长 %s，通常代表限速/排队器触发；若延迟升高，应检查出口拥塞和队列策略。\n' "$qdisc_over_delta"
+      finding="yes"
+      issue_count=$((issue_count + 1))
     fi
     if [[ "$finding" == "no" ]]; then
       printf 'overall=采样期间未观察到明显 softnet/UDP/listen/conntrack 压力；建议保持低延迟保守参数，避免盲目放大队列。\n'
+    else
+      if (( issue_count >= 5 )); then
+        risk_level="高"
+      elif (( issue_count >= 2 )); then
+        risk_level="中"
+      fi
+      printf 'overall=发现 %s 类风险，综合风险=%s；建议用同样业务流量分别跑 bpftune-first 与 classic full，对比本报告 delta。\n' "$issue_count" "$risk_level"
     fi
   } > "$report"
 
@@ -898,7 +1220,7 @@ function_selection_menu() {
   local options=(
     "bpftune-first - 安装/启用 bpftune，并只补转发/WG/Mimic/RA 缺口"
     "classic full - 经典完整优化菜单"
-    "audit - 只读观测 30 秒"
+    "audit - 全面只读体检 30 秒"
     "wgmimic-required - 只应用 WG/Mimic 必需 sysctl"
     "china-region-whitelist - 拉取中国地区白名单"
     "exit - 退出"
@@ -987,7 +1309,7 @@ Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
   bash bbr.sh --quick     # 强制经典精简问答模式，只问转发场景和链路参数
   bash bbr.sh --dry-run   # 只生成配置文件，不应用
   bash bbr.sh --apply     # 生成后默认询问应用
-  bash bbr.sh --audit [秒数]       # 只读观测 softnet/UDP/TCP/conntrack 等压力信号
+  bash bbr.sh --audit [秒数]       # 全面只读体检 softnet/接口/qdisc/TCP/UDP/conntrack/bpftune
   bash bbr.sh --with-audit [秒数]  # 生成配置前先观测，并写入 report.txt
   bash bbr.sh --bpftune-first      # 强制 bpftune 主导，脚本只补转发/WG/Mimic/RA 等缺口
   bash bbr.sh --no-install-bpftune # 禁止自动安装 bpftune，只生成报告/补缺项
@@ -1007,7 +1329,7 @@ Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
 
 默认不启用应用层 mux/multiplex。
 界面保留 BBR/TFO/RPS/nftables/conntrack/sysctl 等英文术语；stateful、多出口、IPv6 RA、RPS、TFO、busy_poll、会话表等自动项不再单独占主菜单。
-audit/observe 模式只读取系统计数器，不写 sysctl、不改 systemd、不加载模块。
+audit/observe 模式只读取系统计数器，不写 sysctl、不改 systemd、不加载模块；报告会包含接口/qdisc/TCP/UDP/conntrack/bpftune 和风险结论。
 默认有 TTY 时进入功能状态/当前参数 + 功能选择菜单；非交互时进入 bpftune-first。
 bpftune-first apply 模式下如果没有 bpftune，会默认尝试用系统包管理器安装；可用 --no-install-bpftune 禁用。
 bpftune-first 模式不写 TCP/UDP buffer、netdev backlog/budget、BBR/qdisc 或 conntrack 容量，避免和 bpftune 动态 tuner 抢控制权。
