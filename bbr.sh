@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.27.5"
+VERSION="2026.06.27.6"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -35,10 +35,11 @@ CLEAN_OUTPUTS="no"
 DRAFT_DIRTY="no"
 WGMIMIC_REQUIRED_ONLY="no"
 CHINA_WHITELIST_ONLY="no"
-BPFTUNE_FIRST_ONLY="${BBR_BPFTUNE_FIRST:-auto}"
+BPFTUNE_FIRST_ONLY="${BBR_BPFTUNE_FIRST:-menu}"
 BPFTUNE_AUTO_INSTALL="${BBR_INSTALL_BPFTUNE:-yes}"
 AUDIT_MODE="off"
 AUDIT_SECONDS="${BBR_AUDIT_SECONDS:-30}"
+ARGS_COUNT="$#"
 AUDIT_REPORT_OUT=""
 AUDIT_SECONDS_EFFECTIVE="未运行"
 AUDIT_SOFTNET_DROPPED_DELTA=0
@@ -764,6 +765,63 @@ interactive_menu() {
   done
 }
 
+function_selection_menu() {
+  local choice key cursor=0 count=7 i
+  local bpftune_state="未安装"
+  command -v bpftune >/dev/null 2>&1 && bpftune_state="已安装"
+  local options=(
+    "bpftune-first - 安装/启用 bpftune，并只补转发/WG/Mimic/RA 缺口"
+    "classic full - 经典完整优化菜单"
+    "classic quick - 经典精简问答"
+    "audit - 只读观测 30 秒"
+    "wgmimic-required - 只应用 WG/Mimic 必需 sysctl"
+    "china-region-whitelist - 拉取中国地区白名单"
+    "exit - 退出"
+  )
+  tput civis 2>/dev/null || true
+  while true; do
+    banner
+    printf '%s功能选择%s\n' "$BOLD" "$RESET"
+    printf '  bpftune 状态 : %s\n' "$bpftune_state"
+    printf '  默认建议     : bpftune-first，由 bpftune 主导动态调优，本脚本只补拓扑缺口。\n'
+    printf '  经典模式     : 保留原固定 sysctl 生成/应用逻辑，适合没有 bpftune 包的系统。\n\n'
+    printf '%s↑/↓ 或 j/k 选择，Enter 确认；也可按 1-7，q 退出%s\n\n' "$DIM" "$RESET"
+    for ((i=0; i<count; i++)); do
+      if (( i == cursor )); then
+        printf '  %s> %d) %s%s\n' "$GREEN" $((i + 1)) "${options[$i]}" "$RESET"
+      else
+        printf '    %d) %s\n' $((i + 1)) "${options[$i]}"
+      fi
+    done
+
+    choice=""
+    if read_key key; then
+      case "$key" in
+        $'\e[A'|$'\eOA'|k|K) cursor=$(((cursor + count - 1) % count)); continue ;;
+        $'\e[B'|$'\eOB'|j|J) cursor=$(((cursor + 1) % count)); continue ;;
+        ""|$'\r'|$'\n') choice=$((cursor + 1)) ;;
+        [1-7]) choice="$key"; cursor=$((choice - 1)) ;;
+        q|Q) exit 0 ;;
+        *) continue ;;
+      esac
+    else
+      prompt_read choice "请选择 [1]: " || true
+      choice="${choice:-1}"
+    fi
+
+    case "$choice" in
+      1) BPFTUNE_FIRST_ONLY="yes"; return 0 ;;
+      2) BPFTUNE_FIRST_ONLY="no"; UI_MODE="menu"; return 0 ;;
+      3) BPFTUNE_FIRST_ONLY="no"; UI_MODE="wizard"; return 0 ;;
+      4) BPFTUNE_FIRST_ONLY="no"; AUDIT_MODE="only"; AUDIT_SECONDS="${AUDIT_SECONDS:-30}"; return 0 ;;
+      5) BPFTUNE_FIRST_ONLY="no"; WGMIMIC_REQUIRED_ONLY="yes"; return 0 ;;
+      6) BPFTUNE_FIRST_ONLY="no"; CHINA_WHITELIST_ONLY="yes"; return 0 ;;
+      7|q|Q) exit 0 ;;
+      *) warn "无效选择"; pause_ui ;;
+    esac
+  done
+}
+
 linear_wizard() {
   ROLE="forwarding"
   SCENE=$(ask_choice "scene 转发场景" "$SCENE" front ix relay plain)
@@ -800,7 +858,7 @@ Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
 固定策略为游戏低延迟 + UDP 实时优先 + 可控吞吐，不再询问容易误选的业务/目标/拓扑分支。
 
 用法:
-  bash bbr.sh             # 默认 bpftune-first：没检测到 bpftune 时 apply 会先尝试安装
+  bash bbr.sh             # 功能选择菜单；非交互时默认 bpftune-first
   bash bbr.sh --classic   # 强制经典完整优化，上下键可视化菜单
   bash bbr.sh --quick     # 强制经典精简问答模式，只问转发场景和链路参数
   bash bbr.sh --dry-run   # 只生成配置文件，不应用
@@ -826,7 +884,7 @@ Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
 默认不启用应用层 mux/multiplex。
 界面保留 BBR/TFO/RPS/nftables/conntrack/sysctl 等英文术语；stateful、多出口、IPv6 RA、RPS、TFO、busy_poll、会话表等自动项不再单独占主菜单。
 audit/observe 模式只读取系统计数器，不写 sysctl、不改 systemd、不加载模块。
-默认进入 bpftune-first：检测到 bpftune 就让它主导；未检测到时 apply 会先尝试安装。
+默认有 TTY 时进入功能选择菜单；非交互时进入 bpftune-first。
 bpftune-first apply 模式下如果没有 bpftune，会默认尝试用系统包管理器安装；可用 --no-install-bpftune 禁用。
 bpftune-first 模式不写 TCP/UDP buffer、netdev backlog/budget、BBR/qdisc 或 conntrack 容量，避免和 bpftune 动态 tuner 抢控制权。
 
@@ -1741,6 +1799,14 @@ if [[ "$CLEAN_OUTPUTS" == "yes" ]]; then
 fi
 
 STATE_DIR="$(default_state_dir)"
+
+if [[ "$BPFTUNE_FIRST_ONLY" == "menu" ]]; then
+  if (( ARGS_COUNT == 0 )) && has_tty; then
+    function_selection_menu
+  else
+    BPFTUNE_FIRST_ONLY="yes"
+  fi
+fi
 
 if [[ "$WGMIMIC_REQUIRED_ONLY" == "yes" ]]; then
   apply_wgmimic_required_sysctl

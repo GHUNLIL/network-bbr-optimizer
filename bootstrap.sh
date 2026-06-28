@@ -13,8 +13,8 @@ usage() {
   cat <<'EOF'
 network-bbr-optimizer bootstrap
 
-自动下载最新版 bbr.sh 并执行。bbr.sh 默认进入 bpftune-first；应用时
-未安装 bpftune 会先尝试安装。下载脚本的 auto 模式会识别中国大陆网络，
+自动下载最新版 bbr.sh 并执行。bbr.sh 默认显示功能选择菜单；非交互时
+进入 bpftune-first，应用时未安装 bpftune 会先尝试安装。下载脚本的 auto 模式会识别中国大陆网络，
 大陆服务器优先走 GitHub 代理，非大陆服务器优先直连；失败会自动换下一个地址。
 
 用法：

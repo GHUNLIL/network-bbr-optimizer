@@ -1,6 +1,6 @@
 # 中文 BBR 网络优化脚本（Network BBR Optimizer）
 
-中文交互式 Linux BBR 与网络转发优化脚本，默认采用 `bpftune-first`：优先让 `oracle/bpftune` 做动态调优，本脚本只补转发/WG/Mimic/IPv6 RA 等拓扑缺口；如果应用时未检测到 bpftune，会先尝试用系统包管理器安装。专用转发、IX 专线、线路转发/国际互联仍可使用。
+中文交互式 Linux BBR 与网络转发优化脚本，默认先进入功能选择菜单：推荐使用 `bpftune-first`，让 `oracle/bpftune` 做动态调优，本脚本只补转发/WG/Mimic/IPv6 RA 等拓扑缺口；如果应用时未检测到 bpftune，会先尝试用系统包管理器安装。专用转发、IX 专线、线路转发/国际互联仍可使用。
 
 固定目标是“游戏低延迟 + UDP 实时优先 + 可控吞吐”：负载下尽量少排队，让游戏包、语音包、SSH 和小请求优先保持响应；同时保留 BBR、内核转发、conntrack、rp_filter/IPv6 RA 处理等转发机需要的能力。应用层 mux/smux/yamux/multiplex 默认不会开启。
 
@@ -26,7 +26,7 @@ conntrack 会区分连接上限和 hash 表大小：`nf_conntrack_max` 仍按默
 
 ## 一键运行
 
-推荐使用 `bootstrap.sh` 入口运行。入口会自动下载最新版 `bbr.sh` 并执行；默认进入 `bpftune-first`，应用时如果没有 bpftune 会尝试安装。下载脚本的 `auto` 模式会识别中国大陆网络，大陆服务器优先走 GitHub 代理，非大陆服务器优先直连，失败会自动换下一个地址。
+推荐使用 `bootstrap.sh` 入口运行。入口会自动下载最新版 `bbr.sh` 并执行；默认显示功能选择菜单，非交互环境才直接进入 `bpftune-first`。下载脚本的 `auto` 模式会识别中国大陆网络，大陆服务器优先走 GitHub 代理，非大陆服务器优先直连，失败会自动换下一个地址。
 
 仍然推荐 `bash <(curl -fsSL ...)`，不要用 `curl ... | bash`。进程替换可以让交互菜单继续从终端读取输入，管道可能占用标准输入，导致上下键菜单显示不完整或无法选择。
 
@@ -105,7 +105,7 @@ if [ "$(id -u)" -eq 0 ]; then bash ./bootstrap.sh; else sudo bash ./bootstrap.sh
 ## 运行模式
 
 ```bash
-bash bbr.sh                 # 默认 bpftune-first，没检测到 bpftune 时 apply 会先尝试安装
+bash bbr.sh                 # 功能选择菜单；非交互时默认 bpftune-first
 bash bbr.sh --classic       # 强制经典完整优化，上下键可视化菜单
 bash bbr.sh --quick         # 强制经典精简问答模式，只问转发场景和链路参数
 bash bbr.sh --dry-run       # 只生成配置，不应用
