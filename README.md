@@ -1,6 +1,6 @@
 # 中文 BBR 网络优化脚本（Network BBR Optimizer）
 
-中文交互式 Linux BBR 与网络转发优化脚本，默认先显示功能状态/当前参数，再进入功能选择菜单：推荐使用 `bpftune-first`，让 `oracle/bpftune` 做动态调优，本脚本只补转发/WG/Mimic/IPv6 RA 等拓扑缺口；如果应用时未检测到 bpftune，会先尝试用系统包管理器安装。专用转发、IX 专线、线路转发/国际互联仍可使用。
+中文交互式 Linux BBR 与网络转发优化脚本，默认面向游戏/实时 UDP、转发节点和上网链路；专用转发、IX 专线、线路转发/国际互联仍可使用，但默认优先级是响应速度，其次保留转发能力，最后才追求跑满带宽。
 
 固定目标是“游戏低延迟 + UDP 实时优先 + 可控吞吐”：负载下尽量少排队，让游戏包、语音包、SSH 和小请求优先保持响应；同时保留 BBR、内核转发、conntrack、rp_filter/IPv6 RA 处理等转发机需要的能力。应用层 mux/smux/yamux/multiplex 默认不会开启。
 
@@ -26,7 +26,7 @@ conntrack 会区分连接上限和 hash 表大小：`nf_conntrack_max` 仍按默
 
 ## 一键运行
 
-推荐使用 `bootstrap.sh` 入口运行。入口会自动下载最新版 `bbr.sh` 并执行；默认显示“功能状态 / 当前参数 + 功能选择”菜单，非交互环境才直接进入 `bpftune-first`。下载脚本的 `auto` 模式会识别中国大陆网络，大陆服务器优先走 GitHub 代理，非大陆服务器优先直连，失败会自动换下一个地址。
+推荐使用 `bootstrap.sh` 入口运行。入口会自动下载最新版 `bbr.sh` 并执行；默认 `auto` 模式会识别中国大陆网络，大陆服务器优先走 GitHub 代理，非大陆服务器优先直连，失败会自动换下一个地址。
 
 仍然推荐 `bash <(curl -fsSL ...)`，不要用 `curl ... | bash`。进程替换可以让交互菜单继续从终端读取输入，管道可能占用标准输入，导致上下键菜单显示不完整或无法选择。
 
@@ -34,34 +34,16 @@ conntrack 会区分连接上限和 hash 表大小：`nf_conntrack_max` 仍按默
 bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh)
 ```
 
-强制经典完整模式：
+进入精简问答模式：
 
 ```bash
-bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --classic
+bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --quick
 ```
 
 只生成配置、不应用到系统：
 
 ```bash
 bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --dry-run
-```
-
-全面只读体检 softnet、接口、qdisc、TCP/UDP、conntrack、bpftune 和配置冲突，不修改系统：
-
-```bash
-bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --audit 30
-```
-
-生成配置前先观测 30 秒，并把观测 delta 写入 `report.txt`：
-
-```bash
-bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --with-audit 30 --dry-run
-```
-
-以 `oracle/bpftune` 为主导，只补转发/WG/Mimic/IPv6 RA 等 bpftune 不覆盖的缺口：
-
-```bash
-bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --bpftune-first --dry-run
 ```
 
 只应用 WireGuard/Mimic 隧道必需的 sysctl，不做 BBR、RPS、队列、conntrack 大优化：
@@ -99,14 +81,10 @@ if [ "$(id -u)" -eq 0 ]; then bash ./bootstrap.sh; else sudo bash ./bootstrap.sh
 ## 运行模式
 
 ```bash
-bash bbr.sh                 # 功能状态/当前参数 + 功能选择菜单；非交互时默认 bpftune-first
-bash bbr.sh --classic       # 强制经典完整优化，上下键可视化菜单
-bash bbr.sh --quick         # 强制经典精简问答模式，只问转发场景和链路参数
+bash bbr.sh                 # 上下键可视化菜单
+bash bbr.sh --quick         # 精简问答模式，只问转发场景和链路参数
 bash bbr.sh --dry-run       # 只生成配置，不应用
 bash bbr.sh --apply         # 生成配置，并询问是否应用
-bash bbr.sh --audit 30      # 全面只读体检 30 秒，不生成、不应用配置
-bash bbr.sh --with-audit 30 # 生成配置前先观测，并写入 report.txt
-bash bbr.sh --bpftune-first # bpftune 主导，只补拓扑/转发/WG/Mimic 缺口
 bash bbr.sh --wgmimic-required # 只应用 WG/Mimic 必需 sysctl
 bash bbr.sh --china-whitelist  # 拉取并运行 china-region-whitelist
 bash bbr.sh --out-dir DIR   # 指定输出目录
@@ -116,11 +94,7 @@ bash bbr.sh --help          # 查看帮助
 
 ## 菜单变化
 
-打开脚本时，第一屏会先显示“功能状态 / 当前参数”：`bpftune` 是否安装、`bpftune.service` 是否运行、BBR/qdisc/TFO、IPv4/IPv6 forwarding、`rp_filter`、默认网卡 IPv6 RA、TCP buffer、netdev/NAPI、conntrack 当前用量、bpftune-first/经典配置文件是否已写入，以及最近一次输出目录。这样可以直接看到功能是否已经生效和关键参数是多少。
-
-进入 `classic full` 后，主界面也会优先显示“系统已生效参数”，也就是从当前机器实时读取到的内核配置。修改转发场景或链路参数后，界面才会切换为“待生效配置草案”，避免把脚本默认值误认为系统当前值。
-
-顶层功能菜单只保留 `classic full` 作为经典模式入口，避免在主流程里重复出现精简问答分支；`--quick` 参数仍保留给旧命令兼容。
+打开脚本时，主界面优先显示“系统已生效参数”，也就是从当前机器实时读取到的内核配置。修改转发场景或链路参数后，界面才会切换为“待生效配置草案”，避免把脚本默认值误认为系统当前值。
 
 交互界面不再询问“机器角色”“优化目标”“业务类型”“BBR 版本假设”“stateful”“多出口/策略路由”“IPv6 RA”“落地路由”这些容易误选的分支；脚本默认按转发节点处理，固定使用响应优先、`UDP 游戏/实时` 和 BBR 自动/未知公式。RPS、TFO、busy_poll、会话表并发强度、TCP/UDP/CPS 容量都会在“生成配置并确认是否应用”时按转发场景、带宽、RTT、内存、CPU、网卡队列和当前路由/防火墙状态自动判断。
 
@@ -131,32 +105,6 @@ bash bbr.sh --help          # 查看帮助
 `--wgmimic-required` 是给 WireGuard + Mimic 隧道的一键最小配置：只开启 IPv4/IPv6 转发、关闭 rp_filter、关闭 redirects/source route 等会影响隧道路由的项目，不会改 BBR、队列、RPS 或 conntrack 容量。完整加速仍走普通生成/应用流程。
 
 应用完成后，脚本会打印一段“本次输入、自动选择和生成参数报告”，里面包含你输入的转发场景/带宽/RTT/丢包抖动、脚本自动判断的 stateful/落地路由/多出口/IPv6 RA/RPS/TFO/busy_poll/会话表强度和判断依据，以及最终生成的核心参数。报告也会列出哪些项目已交回系统自适应，可以整段复制给 Codex 检查是否合理。
-
-`--audit` / `--with-audit` 会按 bpftune 的观测驱动思路读取内核计数器：`/proc/net/softnet_stat`、`/proc/net/snmp`、`/proc/net/netstat`、`/proc/net/sockstat`、`/proc/net/dev`、`/proc/softirqs`、`/proc/pressure/*`、qdisc 统计、conntrack 当前使用量、邻居表数量、bpftune 服务状态和当前关键 sysctl。它只做前后采样 delta，不写 sysctl、不改 systemd、不加载模块；报告会给出接口/qdisc 丢包、backlog/NAPI 压力、UDP 缓冲错误、TCP 重传/超时/listen 溢出、IP fragment/MTU 问题、conntrack 压力、bpftune 与旧经典配置冲突等风险结论。
-
-## bpftune-first 方案
-
-默认运行时，脚本会进入 `bpftune-first`；如果系统未安装 [oracle/bpftune](https://github.com/oracle/bpftune)，应用时会先尝试自动安装。你也可以用 `--classic` 强制回到原完整优化。这个模式会生成 `bpftune-first-report.txt` 和 `98-bpftune-first-bridge.conf`：
-
-- `bpftune` 负责动态性能调优：TCP/UDP buffer、netdev backlog/budget、邻居表、IP fragment、TCP congestion 连接级选择、sysctl 手动覆盖退让。
-- 本脚本只补 `bpftune` 不覆盖或不应该替你猜的拓扑项：IPv4/IPv6 forwarding、IPv6 RA 保留、`rp_filter`、redirect/source-route、WG/Mimic 隧道路由必需项。
-- 本模式故意不写 `tcp_rmem/tcp_wmem`、`rmem_max/wmem_max`、`netdev_max_backlog`、`netdev_budget`、`nf_conntrack_max`、`default_qdisc`、`tcp_congestion_control`，避免和 bpftune 的 tuner 抢控制权。
-- 如果旧版经典模式留下了 `/etc/sysctl.d/99-network-optimize.conf`，`bpftune-first` 应用时会先备份再改名为 `.disabled-by-bpftune-first`，避免 `sysctl --system` 继续加载旧 TCP buffer、BBR/qdisc、backlog、conntrack 等固定参数。
-
-推荐流程：
-
-```bash
-# 1. 先看机器是否有 bpftune 和 BPF 支持
-bash bbr.sh --dry-run
-
-# 2. 如果报告合理，再应用补缺项；没有 bpftune 时会先尝试安装，随后启动 bpftune.service
-sudo bash bbr.sh --apply
-
-# 3. 之后用全面只读体检确认是否还有 UDP/backlog/conntrack/qdisc/TCP 压力
-bash bbr.sh --audit 30
-```
-
-如果机器没有安装 bpftune，`--apply` 会按 `dnf/yum/apt-get/zypper/pacman` 顺序尝试安装系统包。发行版没有 bpftune 包或安装失败时，报告会保留 `bpftune-install.log` 供排查；需要禁用自动安装时可用 `--no-install-bpftune` 或设置 `BBR_INSTALL_BPFTUNE=no`。需要强制回到原完整优化时，可以使用 `--classic` 或设置 `BBR_BPFTUNE_FIRST=no`。
 
 ## 输出目录
 
