@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.27.4"
+VERSION="2026.06.27.5"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -1579,6 +1579,14 @@ write_bpftune_first_sysctl_file() {
 
 write_bpftune_first_report() {
   local report="$1" support_file="$2" support_status="$3" service_state="$4" sysctl_file="$5" audit_file="${6:-}" install_file="${7:-}"
+  local install_note
+  if [[ -n "$install_file" ]]; then
+    install_note="$install_file"
+  elif command -v bpftune >/dev/null 2>&1; then
+    install_note="已检测到 bpftune，无需安装"
+  else
+    install_note="未检测到 bpftune；确认应用后会尝试安装"
+  fi
   {
     printf 'bpftune-first 方案报告\n'
     printf '=====================\n'
@@ -1607,7 +1615,7 @@ write_bpftune_first_report() {
     printf '[生成文件]\n'
     printf 'sysctl=%s\n' "$sysctl_file"
     printf 'audit=%s\n' "${audit_file:-未运行；可加 --with-audit 30}"
-    printf 'bpftune_install_log=%s\n' "${install_file:-未尝试安装}"
+    printf 'bpftune_install_log=%s\n' "$install_note"
     printf 'bpftune_support=%s\n\n' "$support_file"
 
     printf '[bpftune -S 输出]\n'
@@ -1674,8 +1682,10 @@ apply_bpftune_first_mode() {
 
   if [[ "$APPLY_MODE" == "yes" ]]; then
     do_apply="yes"
-  else
+  elif command -v bpftune >/dev/null 2>&1; then
     do_apply=$(ask_yes_no "现在应用 bpftune-first 补缺配置吗" "yes")
+  else
+    do_apply=$(ask_yes_no "未检测到 bpftune。现在安装 bpftune 并应用 bpftune-first 补缺配置吗" "yes")
   fi
   [[ "$do_apply" == "yes" ]] || { log "未应用配置。"; return 0; }
 
