@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.27.2"
+VERSION="2026.06.27.4"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -35,7 +35,8 @@ CLEAN_OUTPUTS="no"
 DRAFT_DIRTY="no"
 WGMIMIC_REQUIRED_ONLY="no"
 CHINA_WHITELIST_ONLY="no"
-BPFTUNE_FIRST_ONLY="no"
+BPFTUNE_FIRST_ONLY="${BBR_BPFTUNE_FIRST:-auto}"
+BPFTUNE_AUTO_INSTALL="${BBR_INSTALL_BPFTUNE:-yes}"
 AUDIT_MODE="off"
 AUDIT_SECONDS="${BBR_AUDIT_SECONDS:-30}"
 AUDIT_REPORT_OUT=""
@@ -799,13 +800,15 @@ Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
 固定策略为游戏低延迟 + UDP 实时优先 + 可控吞吐，不再询问容易误选的业务/目标/拓扑分支。
 
 用法:
-  bash bbr.sh             # 上下键可视化菜单，先生成配置，再确认是否应用
-  bash bbr.sh --quick     # 精简问答模式，只问转发场景和链路参数
+  bash bbr.sh             # 默认 bpftune-first：没检测到 bpftune 时 apply 会先尝试安装
+  bash bbr.sh --classic   # 强制经典完整优化，上下键可视化菜单
+  bash bbr.sh --quick     # 强制经典精简问答模式，只问转发场景和链路参数
   bash bbr.sh --dry-run   # 只生成配置文件，不应用
   bash bbr.sh --apply     # 生成后默认询问应用
   bash bbr.sh --audit [秒数]       # 只读观测 softnet/UDP/TCP/conntrack 等压力信号
   bash bbr.sh --with-audit [秒数]  # 生成配置前先观测，并写入 report.txt
-  bash bbr.sh --bpftune-first      # bpftune 主导，脚本只补转发/WG/Mimic/RA 等缺口
+  bash bbr.sh --bpftune-first      # 强制 bpftune 主导，脚本只补转发/WG/Mimic/RA 等缺口
+  bash bbr.sh --no-install-bpftune # 禁止自动安装 bpftune，只生成报告/补缺项
   bash bbr.sh --wgmimic-required  # 只生成/应用 WG/Mimic 必需 sysctl
   bash bbr.sh --china-whitelist   # 拉取并运行 china-region-whitelist
   bash bbr.sh --out-dir DIR       # 指定输出目录
@@ -823,6 +826,8 @@ Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
 默认不启用应用层 mux/multiplex。
 界面保留 BBR/TFO/RPS/nftables/conntrack/sysctl 等英文术语；stateful、多出口、IPv6 RA、RPS、TFO、busy_poll、会话表等自动项不再单独占主菜单。
 audit/observe 模式只读取系统计数器，不写 sysctl、不改 systemd、不加载模块。
+默认进入 bpftune-first：检测到 bpftune 就让它主导；未检测到时 apply 会先尝试安装。
+bpftune-first apply 模式下如果没有 bpftune，会默认尝试用系统包管理器安装；可用 --no-install-bpftune 禁用。
 bpftune-first 模式不写 TCP/UDP buffer、netdev backlog/budget、BBR/qdisc 或 conntrack 容量，避免和 bpftune 动态 tuner 抢控制权。
 
 术语说明:
@@ -837,11 +842,13 @@ USAGE
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --quick) UI_MODE="wizard" ;;
+    --quick) UI_MODE="wizard"; BPFTUNE_FIRST_ONLY="no" ;;
+    --classic|--full|--legacy-full) BPFTUNE_FIRST_ONLY="no" ;;
     --dry-run) APPLY_MODE="no" ;;
     --apply) APPLY_MODE="yes" ;;
     --audit|--observe)
       AUDIT_MODE="only"
+      BPFTUNE_FIRST_ONLY="no"
       if [[ "${2:-}" =~ ^[0-9]+$ ]]; then
         shift
         AUDIT_SECONDS="$1"
@@ -855,6 +862,7 @@ while [[ $# -gt 0 ]]; do
       fi
       ;;
     --bpftune-first|--bpftune-assist|--bpftune-bridge) BPFTUNE_FIRST_ONLY="yes" ;;
+    --no-install-bpftune|--skip-bpftune-install) BPFTUNE_AUTO_INSTALL="no" ;;
     --wgmimic-required|--wgmimic-sysctl|--wg-mimic-sysctl) WGMIMIC_REQUIRED_ONLY="yes" ;;
     --china-whitelist|--china-region-whitelist|--whitelist) CHINA_WHITELIST_ONLY="yes" ;;
     --out-dir)
@@ -1463,6 +1471,75 @@ bpftune_service_state() {
   fi
 }
 
+install_bpftune_if_missing() {
+  local log_file="$1" status=1
+  command -v bpftune >/dev/null 2>&1 && return 0
+  : > "$log_file"
+  {
+    printf 'bpftune auto-install log\n'
+    printf '========================\n'
+    printf 'time_utc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf 'mode=%s\n\n' "$BPFTUNE_AUTO_INSTALL"
+  } >> "$log_file"
+
+  case "${BPFTUNE_AUTO_INSTALL:-yes}" in
+    yes|true|1|auto) ;;
+    *)
+      printf 'auto_install=disabled\n' >> "$log_file"
+      warn "bpftune 未安装，且自动安装已禁用。"
+      return 1
+      ;;
+  esac
+
+  if ! is_root; then
+    printf 'auto_install=skipped_not_root\n' >> "$log_file"
+    warn "bpftune 未安装；当前不是 root，无法自动安装。"
+    return 1
+  fi
+
+  log "未检测到 bpftune，开始尝试用系统包管理器安装。"
+  set +e
+  if command -v dnf >/dev/null 2>&1; then
+    printf 'installer=dnf\n' >> "$log_file"
+    dnf install -y bpftune >> "$log_file" 2>&1
+    status=$?
+  elif command -v yum >/dev/null 2>&1; then
+    printf 'installer=yum\n' >> "$log_file"
+    yum install -y bpftune >> "$log_file" 2>&1
+    status=$?
+  elif command -v apt-get >/dev/null 2>&1; then
+    printf 'installer=apt-get\n' >> "$log_file"
+    if apt-get update >> "$log_file" 2>&1; then
+      apt-get install -y bpftune >> "$log_file" 2>&1
+      status=$?
+    else
+      status=1
+    fi
+  elif command -v zypper >/dev/null 2>&1; then
+    printf 'installer=zypper\n' >> "$log_file"
+    zypper --non-interactive install bpftune >> "$log_file" 2>&1
+    status=$?
+  elif command -v pacman >/dev/null 2>&1; then
+    printf 'installer=pacman\n' >> "$log_file"
+    pacman -Sy --noconfirm bpftune >> "$log_file" 2>&1
+    status=$?
+  else
+    printf 'installer=not_found\n' >> "$log_file"
+    status=127
+  fi
+  set -e
+
+  if command -v bpftune >/dev/null 2>&1; then
+    printf 'result=installed\n' >> "$log_file"
+    log "bpftune 安装完成：$(command -v bpftune)"
+    return 0
+  fi
+
+  printf 'result=failed status=%s\n' "$status" >> "$log_file"
+  warn "bpftune 自动安装失败或发行版没有可用包；日志: $log_file"
+  return 1
+}
+
 write_bpftune_first_sysctl_file() {
   local file="$1" default_iface="${DEFAULT_IFACE:-}" preserve_ra="no"
   [[ -n "$default_iface" ]] || default_iface="$(detect_default_iface)"
@@ -1501,7 +1578,7 @@ write_bpftune_first_sysctl_file() {
 }
 
 write_bpftune_first_report() {
-  local report="$1" support_file="$2" support_status="$3" service_state="$4" sysctl_file="$5"
+  local report="$1" support_file="$2" support_status="$3" service_state="$4" sysctl_file="$5" audit_file="${6:-}" install_file="${7:-}"
   {
     printf 'bpftune-first 方案报告\n'
     printf '=====================\n'
@@ -1529,6 +1606,8 @@ write_bpftune_first_report() {
 
     printf '[生成文件]\n'
     printf 'sysctl=%s\n' "$sysctl_file"
+    printf 'audit=%s\n' "${audit_file:-未运行；可加 --with-audit 30}"
+    printf 'bpftune_install_log=%s\n' "${install_file:-未尝试安装}"
     printf 'bpftune_support=%s\n\n' "$support_file"
 
     printf '[bpftune -S 输出]\n'
@@ -1545,7 +1624,7 @@ maybe_start_bpftune_service() {
 }
 
 apply_bpftune_first_mode() {
-  local out_dir sysctl_out report_out support_out backup_dir do_apply support_status service_state
+  local out_dir sysctl_out report_out support_out audit_out install_out backup_dir do_apply support_status service_state
   need_linux
   if [[ -z "${STATE_DIR:-}" ]]; then
     STATE_DIR="$(default_state_dir)"
@@ -1564,14 +1643,20 @@ apply_bpftune_first_mode() {
   sysctl_out="$out_dir/98-bpftune-first-bridge.conf"
   report_out="$out_dir/bpftune-first-report.txt"
   support_out="$out_dir/bpftune-support.txt"
+  install_out="$out_dir/bpftune-install.log"
+  audit_out=""
 
   write_bpftune_first_sysctl_file "$sysctl_out"
+  if [[ "$AUDIT_MODE" == "with" ]]; then
+    audit_out="$out_dir/audit.txt"
+    write_observability_audit "$audit_out" "$(audit_sample_seconds)" no
+  fi
   set +e
   bpftune_support_probe "$support_out"
   support_status=$?
   set -e
   service_state="$(bpftune_service_state)"
-  write_bpftune_first_report "$report_out" "$support_out" "$support_status" "$service_state" "$sysctl_out"
+  write_bpftune_first_report "$report_out" "$support_out" "$support_status" "$service_state" "$sysctl_out" "$audit_out" ""
 
   printf '\nbpftune-first 方案：\n'
   sed -n '1,180p' "$report_out"
@@ -1593,6 +1678,16 @@ apply_bpftune_first_mode() {
     do_apply=$(ask_yes_no "现在应用 bpftune-first 补缺配置吗" "yes")
   fi
   [[ "$do_apply" == "yes" ]] || { log "未应用配置。"; return 0; }
+
+  if ! command -v bpftune >/dev/null 2>&1; then
+    install_bpftune_if_missing "$install_out" || true
+    set +e
+    bpftune_support_probe "$support_out"
+    support_status=$?
+    set -e
+    service_state="$(bpftune_service_state)"
+    write_bpftune_first_report "$report_out" "$support_out" "$support_status" "$service_state" "$sysctl_out" "$audit_out" "$install_out"
+  fi
 
   backup_dir="$STATE_DIR/backups/${TS}-bpftune-first"
   mkdir -p "$backup_dir"
@@ -1618,6 +1713,15 @@ apply_bpftune_first_mode() {
   printf '备份目录: %s\n' "$backup_dir"
 }
 
+should_run_bpftune_first() {
+  case "${BPFTUNE_FIRST_ONLY:-auto}" in
+    yes|true|1|force) return 0 ;;
+    no|false|0|off) return 1 ;;
+    auto|"") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 need_linux
 
 TS="$(date +%Y%m%d-%H%M%S)"
@@ -1638,7 +1742,7 @@ if [[ "$CHINA_WHITELIST_ONLY" == "yes" ]]; then
   exit $?
 fi
 
-if [[ "$BPFTUNE_FIRST_ONLY" == "yes" ]]; then
+if should_run_bpftune_first; then
   apply_bpftune_first_mode
   exit 0
 fi
