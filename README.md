@@ -145,6 +145,7 @@ bash bbr.sh --help          # 查看帮助
 - `bpftune` 负责动态性能调优：TCP/UDP buffer、netdev backlog/budget、邻居表、IP fragment、TCP congestion 连接级选择、sysctl 手动覆盖退让。
 - 本脚本只补 `bpftune` 不覆盖或不应该替你猜的拓扑项：IPv4/IPv6 forwarding、IPv6 RA 保留、`rp_filter`、redirect/source-route、WG/Mimic 隧道路由必需项。
 - 本模式故意不写 `tcp_rmem/tcp_wmem`、`rmem_max/wmem_max`、`netdev_max_backlog`、`netdev_budget`、`nf_conntrack_max`、`default_qdisc`、`tcp_congestion_control`，避免和 bpftune 的 tuner 抢控制权。
+- 如果旧版经典模式留下了 `/etc/sysctl.d/99-network-optimize.conf`，`bpftune-first` 应用时会先备份再改名为 `.disabled-by-bpftune-first`，避免 `sysctl --system` 继续加载旧 TCP buffer、BBR/qdisc、backlog、conntrack 等固定参数。
 
 推荐流程：
 

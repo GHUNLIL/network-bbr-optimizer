@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.27.7"
+VERSION="2026.06.27.8"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -404,10 +404,16 @@ show_live_status_body() {
 }
 
 config_file_state() {
-  local file="$1"
+  local file="$1" disabled
   if [[ -s "$file" ]]; then
     printf '已写入'
   else
+    for disabled in "$file".disabled-by-bpftune-first*; do
+      if [[ -e "$disabled" ]]; then
+        printf '已禁用'
+        return
+      fi
+    done
     printf '未写入'
   fi
 }
@@ -1756,9 +1762,9 @@ write_bpftune_first_sysctl_file() {
 }
 
 write_bpftune_first_report() {
-  local report="$1" support_file="$2" support_status="$3" service_state="$4" sysctl_file="$5" audit_file="${6:-}" install_file="${7:-}"
+  local report="$1" support_file="$2" support_status="$3" service_state="$4" sysctl_file="$5" audit_file="${6:-}" install_file="${7:-}" legacy_sysctl_action="${8:-未处理}"
   local install_note
-  if [[ -n "$install_file" ]]; then
+  if [[ -n "$install_file" && -s "$install_file" ]]; then
     install_note="$install_file"
   elif command -v bpftune >/dev/null 2>&1; then
     install_note="已检测到 bpftune，无需安装"
@@ -1796,6 +1802,9 @@ write_bpftune_first_report() {
     printf 'bpftune_install_log=%s\n' "$install_note"
     printf 'bpftune_support=%s\n\n' "$support_file"
 
+    printf '[兼容清理]\n'
+    printf '旧经典sysctl=%s\n\n' "$legacy_sysctl_action"
+
     printf '[bpftune -S 输出]\n'
     sed -n '1,160p' "$support_file"
   } > "$report"
@@ -1809,8 +1818,25 @@ maybe_start_bpftune_service() {
   fi
 }
 
+disable_legacy_classic_sysctl_for_bpftune() {
+  local backup_dir="$1"
+  local legacy="/etc/sysctl.d/99-network-optimize.conf"
+  local disabled="${legacy}.disabled-by-bpftune-first"
+  if [[ ! -e "$legacy" ]]; then
+    printf '未发现旧经典 sysctl 残留'
+    return 0
+  fi
+
+  backup_file "$legacy" "$backup_dir"
+  if [[ -e "$disabled" ]]; then
+    disabled="${legacy}.disabled-by-bpftune-first.$(date +%Y%m%d-%H%M%S)"
+  fi
+  mv "$legacy" "$disabled"
+  printf '已备份并禁用旧经典 sysctl: %s -> %s' "$legacy" "$disabled"
+}
+
 apply_bpftune_first_mode() {
-  local out_dir sysctl_out report_out support_out audit_out install_out backup_dir do_apply support_status service_state
+  local out_dir sysctl_out report_out support_out audit_out install_out backup_dir do_apply support_status service_state legacy_sysctl_action
   need_linux
   if [[ -z "${STATE_DIR:-}" ]]; then
     STATE_DIR="$(default_state_dir)"
@@ -1831,6 +1857,7 @@ apply_bpftune_first_mode() {
   support_out="$out_dir/bpftune-support.txt"
   install_out="$out_dir/bpftune-install.log"
   audit_out=""
+  legacy_sysctl_action="确认应用后会备份并禁用旧 /etc/sysctl.d/99-network-optimize.conf（如存在），避免旧经典参数覆盖 bpftune-first。"
 
   write_bpftune_first_sysctl_file "$sysctl_out"
   if [[ "$AUDIT_MODE" == "with" ]]; then
@@ -1842,7 +1869,7 @@ apply_bpftune_first_mode() {
   support_status=$?
   set -e
   service_state="$(bpftune_service_state)"
-  write_bpftune_first_report "$report_out" "$support_out" "$support_status" "$service_state" "$sysctl_out" "$audit_out" ""
+  write_bpftune_first_report "$report_out" "$support_out" "$support_status" "$service_state" "$sysctl_out" "$audit_out" "" "$legacy_sysctl_action"
 
   printf '\nbpftune-first 方案：\n'
   sed -n '1,180p' "$report_out"
@@ -1874,13 +1901,15 @@ apply_bpftune_first_mode() {
     support_status=$?
     set -e
     service_state="$(bpftune_service_state)"
-    write_bpftune_first_report "$report_out" "$support_out" "$support_status" "$service_state" "$sysctl_out" "$audit_out" "$install_out"
+    write_bpftune_first_report "$report_out" "$support_out" "$support_status" "$service_state" "$sysctl_out" "$audit_out" "$install_out" "$legacy_sysctl_action"
   fi
 
   backup_dir="$STATE_DIR/backups/${TS}-bpftune-first"
   mkdir -p "$backup_dir"
   ln -sfn "$backup_dir" "$STATE_DIR/latest-backup" 2>/dev/null || true
   install_file "$sysctl_out" /etc/sysctl.d/98-bpftune-first-bridge.conf 0644 "$backup_dir"
+  legacy_sysctl_action="$(disable_legacy_classic_sysctl_for_bpftune "$backup_dir")"
+  write_bpftune_first_report "$report_out" "$support_out" "$support_status" "$service_state" "$sysctl_out" "$audit_out" "$install_out" "$legacy_sysctl_action"
   sysctl --system
   apply_generated_sysctl_live "$sysctl_out"
 
@@ -1897,6 +1926,7 @@ apply_bpftune_first_mode() {
   print_live_sysctl net.ipv6.conf.all.forwarding
   print_live_sysctl net.ipv4.conf.all.rp_filter
   print_live_sysctl net.ipv4.conf.default.rp_filter
+  printf '旧经典 sysctl: %s\n' "$legacy_sysctl_action"
   printf '报告: %s\n' "$report_out"
   printf '备份目录: %s\n' "$backup_dir"
 }
