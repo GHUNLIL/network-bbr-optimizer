@@ -40,12 +40,6 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL
 bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --classic
 ```
 
-进入经典精简问答模式：
-
-```bash
-bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --quick
-```
-
 只生成配置、不应用到系统：
 
 ```bash
@@ -125,6 +119,8 @@ bash bbr.sh --help          # 查看帮助
 打开脚本时，第一屏会先显示“功能状态 / 当前参数”：`bpftune` 是否安装、`bpftune.service` 是否运行、BBR/qdisc/TFO、IPv4/IPv6 forwarding、`rp_filter`、默认网卡 IPv6 RA、TCP buffer、netdev/NAPI、conntrack 当前用量、bpftune-first/经典配置文件是否已写入，以及最近一次输出目录。这样可以直接看到功能是否已经生效和关键参数是多少。
 
 进入 `classic full` 后，主界面也会优先显示“系统已生效参数”，也就是从当前机器实时读取到的内核配置。修改转发场景或链路参数后，界面才会切换为“待生效配置草案”，避免把脚本默认值误认为系统当前值。
+
+顶层功能菜单只保留 `classic full` 作为经典模式入口，避免在主流程里重复出现精简问答分支；`--quick` 参数仍保留给旧命令兼容。
 
 交互界面不再询问“机器角色”“优化目标”“业务类型”“BBR 版本假设”“stateful”“多出口/策略路由”“IPv6 RA”“落地路由”这些容易误选的分支；脚本默认按转发节点处理，固定使用响应优先、`UDP 游戏/实时` 和 BBR 自动/未知公式。RPS、TFO、busy_poll、会话表并发强度、TCP/UDP/CPS 容量都会在“生成配置并确认是否应用”时按转发场景、带宽、RTT、内存、CPU、网卡队列和当前路由/防火墙状态自动判断。
 

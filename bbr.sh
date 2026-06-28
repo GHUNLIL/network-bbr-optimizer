@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.27.8"
+VERSION="2026.06.27.9"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -894,11 +894,10 @@ interactive_menu() {
 }
 
 function_selection_menu() {
-  local choice key cursor=0 count=7 i
+  local choice key cursor=0 count=6 i
   local options=(
     "bpftune-first - 安装/启用 bpftune，并只补转发/WG/Mimic/RA 缺口"
     "classic full - 经典完整优化菜单"
-    "classic quick - 经典精简问答"
     "audit - 只读观测 30 秒"
     "wgmimic-required - 只应用 WG/Mimic 必需 sysctl"
     "china-region-whitelist - 拉取中国地区白名单"
@@ -911,7 +910,7 @@ function_selection_menu() {
     printf '%s功能选择%s\n' "$BOLD" "$RESET"
     printf '  默认建议     : bpftune-first，由 bpftune 主导动态调优，本脚本只补拓扑缺口。\n'
     printf '  经典模式     : 保留原固定 sysctl 生成/应用逻辑，适合没有 bpftune 包的系统。\n\n'
-    printf '%s↑/↓ 或 j/k 选择，Enter 确认；也可按 1-7，q 退出%s\n\n' "$DIM" "$RESET"
+    printf '%s↑/↓ 或 j/k 选择，Enter 确认；也可按 1-6，q 退出%s\n\n' "$DIM" "$RESET"
     for ((i=0; i<count; i++)); do
       if (( i == cursor )); then
         printf '  %s> %d) %s%s\n' "$GREEN" $((i + 1)) "${options[$i]}" "$RESET"
@@ -926,7 +925,7 @@ function_selection_menu() {
         $'\e[A'|$'\eOA'|k|K) cursor=$(((cursor + count - 1) % count)); continue ;;
         $'\e[B'|$'\eOB'|j|J) cursor=$(((cursor + 1) % count)); continue ;;
         ""|$'\r'|$'\n') choice=$((cursor + 1)) ;;
-        [1-7]) choice="$key"; cursor=$((choice - 1)) ;;
+        [1-6]) choice="$key"; cursor=$((choice - 1)) ;;
         q|Q) exit 0 ;;
         *) continue ;;
       esac
@@ -938,11 +937,10 @@ function_selection_menu() {
     case "$choice" in
       1) BPFTUNE_FIRST_ONLY="yes"; return 0 ;;
       2) BPFTUNE_FIRST_ONLY="no"; UI_MODE="menu"; return 0 ;;
-      3) BPFTUNE_FIRST_ONLY="no"; UI_MODE="wizard"; return 0 ;;
-      4) BPFTUNE_FIRST_ONLY="no"; AUDIT_MODE="only"; AUDIT_SECONDS="${AUDIT_SECONDS:-30}"; return 0 ;;
-      5) BPFTUNE_FIRST_ONLY="no"; WGMIMIC_REQUIRED_ONLY="yes"; return 0 ;;
-      6) BPFTUNE_FIRST_ONLY="no"; CHINA_WHITELIST_ONLY="yes"; return 0 ;;
-      7|q|Q) exit 0 ;;
+      3) BPFTUNE_FIRST_ONLY="no"; AUDIT_MODE="only"; AUDIT_SECONDS="${AUDIT_SECONDS:-30}"; return 0 ;;
+      4) BPFTUNE_FIRST_ONLY="no"; WGMIMIC_REQUIRED_ONLY="yes"; return 0 ;;
+      5) BPFTUNE_FIRST_ONLY="no"; CHINA_WHITELIST_ONLY="yes"; return 0 ;;
+      6|q|Q) exit 0 ;;
       *) warn "无效选择"; pause_ui ;;
     esac
   done
