@@ -1,6 +1,6 @@
 # 中文 BBR 网络优化脚本（Network BBR Optimizer）
 
-中文交互式 Linux BBR 与网络转发优化脚本，默认先进入功能选择菜单：推荐使用 `bpftune-first`，让 `oracle/bpftune` 做动态调优，本脚本只补转发/WG/Mimic/IPv6 RA 等拓扑缺口；如果应用时未检测到 bpftune，会先尝试用系统包管理器安装。专用转发、IX 专线、线路转发/国际互联仍可使用。
+中文交互式 Linux BBR 与网络转发优化脚本，默认先显示功能状态/当前参数，再进入功能选择菜单：推荐使用 `bpftune-first`，让 `oracle/bpftune` 做动态调优，本脚本只补转发/WG/Mimic/IPv6 RA 等拓扑缺口；如果应用时未检测到 bpftune，会先尝试用系统包管理器安装。专用转发、IX 专线、线路转发/国际互联仍可使用。
 
 固定目标是“游戏低延迟 + UDP 实时优先 + 可控吞吐”：负载下尽量少排队，让游戏包、语音包、SSH 和小请求优先保持响应；同时保留 BBR、内核转发、conntrack、rp_filter/IPv6 RA 处理等转发机需要的能力。应用层 mux/smux/yamux/multiplex 默认不会开启。
 
@@ -26,7 +26,7 @@ conntrack 会区分连接上限和 hash 表大小：`nf_conntrack_max` 仍按默
 
 ## 一键运行
 
-推荐使用 `bootstrap.sh` 入口运行。入口会自动下载最新版 `bbr.sh` 并执行；默认显示功能选择菜单，非交互环境才直接进入 `bpftune-first`。下载脚本的 `auto` 模式会识别中国大陆网络，大陆服务器优先走 GitHub 代理，非大陆服务器优先直连，失败会自动换下一个地址。
+推荐使用 `bootstrap.sh` 入口运行。入口会自动下载最新版 `bbr.sh` 并执行；默认显示“功能状态 / 当前参数 + 功能选择”菜单，非交互环境才直接进入 `bpftune-first`。下载脚本的 `auto` 模式会识别中国大陆网络，大陆服务器优先走 GitHub 代理，非大陆服务器优先直连，失败会自动换下一个地址。
 
 仍然推荐 `bash <(curl -fsSL ...)`，不要用 `curl ... | bash`。进程替换可以让交互菜单继续从终端读取输入，管道可能占用标准输入，导致上下键菜单显示不完整或无法选择。
 
@@ -105,7 +105,7 @@ if [ "$(id -u)" -eq 0 ]; then bash ./bootstrap.sh; else sudo bash ./bootstrap.sh
 ## 运行模式
 
 ```bash
-bash bbr.sh                 # 功能选择菜单；非交互时默认 bpftune-first
+bash bbr.sh                 # 功能状态/当前参数 + 功能选择菜单；非交互时默认 bpftune-first
 bash bbr.sh --classic       # 强制经典完整优化，上下键可视化菜单
 bash bbr.sh --quick         # 强制经典精简问答模式，只问转发场景和链路参数
 bash bbr.sh --dry-run       # 只生成配置，不应用
@@ -122,7 +122,9 @@ bash bbr.sh --help          # 查看帮助
 
 ## 菜单变化
 
-打开脚本时，主界面优先显示“系统已生效参数”，也就是从当前机器实时读取到的内核配置。修改转发场景或链路参数后，界面才会切换为“待生效配置草案”，避免把脚本默认值误认为系统当前值。
+打开脚本时，第一屏会先显示“功能状态 / 当前参数”：`bpftune` 是否安装、`bpftune.service` 是否运行、BBR/qdisc/TFO、IPv4/IPv6 forwarding、`rp_filter`、默认网卡 IPv6 RA、TCP buffer、netdev/NAPI、conntrack 当前用量、bpftune-first/经典配置文件是否已写入，以及最近一次输出目录。这样可以直接看到功能是否已经生效和关键参数是多少。
+
+进入 `classic full` 后，主界面也会优先显示“系统已生效参数”，也就是从当前机器实时读取到的内核配置。修改转发场景或链路参数后，界面才会切换为“待生效配置草案”，避免把脚本默认值误认为系统当前值。
 
 交互界面不再询问“机器角色”“优化目标”“业务类型”“BBR 版本假设”“stateful”“多出口/策略路由”“IPv6 RA”“落地路由”这些容易误选的分支；脚本默认按转发节点处理，固定使用响应优先、`UDP 游戏/实时` 和 BBR 自动/未知公式。RPS、TFO、busy_poll、会话表并发强度、TCP/UDP/CPS 容量都会在“生成配置并确认是否应用”时按转发场景、带宽、RTT、内存、CPU、网卡队列和当前路由/防火墙状态自动判断。
 

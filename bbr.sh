@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.27.6"
+VERSION="2026.06.27.7"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -367,6 +367,17 @@ print_live_sysctl() {
   fi
 }
 
+live_sysctl_value() {
+  local key="$1" fallback="${2:-n/a}" value
+  if sysctl_exists "$key"; then
+    value="$(read_sysctl "$key" "$fallback")"
+    value="${value//$'\n'/ }"
+    printf '%s' "$value"
+  else
+    printf '%s' "$fallback"
+  fi
+}
+
 show_live_status_body() {
   printf '%s系统已生效参数%s\n' "$BOLD" "$RESET"
   printf '  说明            : 以下为从当前系统实时读取的值；修改 1-2 项后，主界面会切换为待生效配置草案。\n'
@@ -390,6 +401,117 @@ show_live_status_body() {
   ip route show default 2>/dev/null || true
   ip -6 route show default 2>/dev/null || true
   printf '\n'
+}
+
+config_file_state() {
+  local file="$1"
+  if [[ -s "$file" ]]; then
+    printf '已写入'
+  else
+    printf '未写入'
+  fi
+}
+
+latest_output_label() {
+  local latest_dir target
+  [[ -n "${STATE_DIR:-}" ]] || { printf '无'; return; }
+  latest_dir="$STATE_DIR/latest"
+  if [[ -L "$latest_dir" ]]; then
+    target="$(readlink "$latest_dir" 2>/dev/null || true)"
+    printf '%s' "${target:-$latest_dir}"
+  elif [[ -e "$latest_dir" ]]; then
+    printf '%s' "$latest_dir"
+  else
+    printf '无'
+  fi
+}
+
+print_function_status_dashboard() {
+  local iface cpu rx tx
+  local bpftune_cmd bpftune_service bpftune_support
+  local cc qdisc bbr_state tfo
+  local ip4_forward ip6_forward rp_all rp_default ra_value bridge_state
+  local tcp_rmem tcp_wmem rmem_max wmem_max backlog budget budget_usecs busy_poll busy_read
+  local nf_count nf_max nf_pct nf_label
+
+  iface="${DEFAULT_IFACE:-$(detect_default_iface)}"
+  iface="${iface:-unknown}"
+  cpu="${CPU_COUNT:-$(cpu_count)}"
+  if [[ "$iface" != "unknown" ]]; then
+    rx="$(count_queues "$iface" rx)"
+    tx="$(count_queues "$iface" tx)"
+  else
+    rx="0"
+    tx="0"
+  fi
+
+  if command -v bpftune >/dev/null 2>&1; then
+    bpftune_cmd="已安装 ($(command -v bpftune))"
+    bpftune_service="$(bpftune_service_state)"
+    bpftune_support="可用性可在 bpftune-first 报告里看 bpftune -S"
+  else
+    bpftune_cmd="未安装"
+    bpftune_service="未运行"
+    bpftune_support="选择 bpftune-first 应用时会尝试安装"
+  fi
+
+  cc="$(live_sysctl_value net.ipv4.tcp_congestion_control "n/a")"
+  qdisc="$(live_sysctl_value net.core.default_qdisc "n/a")"
+  tfo="$(live_sysctl_value net.ipv4.tcp_fastopen "n/a")"
+  if [[ "$cc" == *bbr* ]]; then
+    bbr_state="已启用"
+  else
+    bbr_state="未启用/由 bpftune 或内核接管"
+  fi
+
+  ip4_forward="$(live_sysctl_value net.ipv4.ip_forward "n/a")"
+  ip6_forward="$(live_sysctl_value net.ipv6.conf.all.forwarding "n/a")"
+  rp_all="$(live_sysctl_value net.ipv4.conf.all.rp_filter "n/a")"
+  rp_default="$(live_sysctl_value net.ipv4.conf.default.rp_filter "n/a")"
+  if [[ "$iface" != "unknown" ]]; then
+    ra_value="$(live_sysctl_value "net.ipv6.conf.${iface}.accept_ra" "n/a")"
+  else
+    ra_value="n/a"
+  fi
+  if [[ "$ip4_forward" == "1" && "$rp_all" == "0" && "$rp_default" == "0" ]]; then
+    bridge_state="核心已满足"
+  else
+    bridge_state="待应用/待补缺"
+  fi
+
+  tcp_rmem="$(live_sysctl_value net.ipv4.tcp_rmem "n/a")"
+  tcp_wmem="$(live_sysctl_value net.ipv4.tcp_wmem "n/a")"
+  rmem_max="$(live_sysctl_value net.core.rmem_max "n/a")"
+  wmem_max="$(live_sysctl_value net.core.wmem_max "n/a")"
+  backlog="$(live_sysctl_value net.core.netdev_max_backlog "n/a")"
+  budget="$(live_sysctl_value net.core.netdev_budget "n/a")"
+  budget_usecs="$(live_sysctl_value net.core.netdev_budget_usecs "n/a")"
+  busy_poll="$(live_sysctl_value net.core.busy_poll "n/a")"
+  busy_read="$(live_sysctl_value net.core.busy_read "n/a")"
+
+  nf_count="$(read_file_number /proc/sys/net/netfilter/nf_conntrack_count)"
+  nf_max="$(read_file_number /proc/sys/net/netfilter/nf_conntrack_max)"
+  if (( nf_max > 0 )); then
+    nf_pct=$((nf_count * 100 / nf_max))
+    nf_label="${nf_count}/${nf_max} (${nf_pct}%)"
+  else
+    nf_label="n/a"
+  fi
+
+  printf '%s功能状态 / 当前参数%s\n' "$BOLD" "$RESET"
+  printf '  bpftune      : %s；service=%s；%s\n' "$bpftune_cmd" "$bpftune_service" "$bpftune_support"
+  printf '  生效判断     : BBR=%s；WG/Mimic 转发补缺=%s；bpftune-first配置=%s；经典配置=%s\n' \
+    "$bbr_state" "$bridge_state" "$(config_file_state /etc/sysctl.d/98-bpftune-first-bridge.conf)" "$(config_file_state /etc/sysctl.d/99-network-optimize.conf)"
+  printf '  网卡/队列    : iface=%s；RX=%s；TX=%s；CPU=%s\n' "$iface" "$rx" "$tx" "$cpu"
+  printf '  BBR/qdisc   : tcp_congestion_control=%s；default_qdisc=%s；tcp_fastopen=%s\n' "$cc" "$qdisc" "$tfo"
+  printf '  转发/路由    : ip_forward=%s；ipv6_forwarding=%s；rp_filter all/default=%s/%s；accept_ra(%s)=%s\n' \
+    "$ip4_forward" "$ip6_forward" "$rp_all" "$rp_default" "$iface" "$ra_value"
+  printf '  TCP buffer  : tcp_rmem=%s\n' "$tcp_rmem"
+  printf '                tcp_wmem=%s；rmem_max=%s；wmem_max=%s\n' "$tcp_wmem" "$rmem_max" "$wmem_max"
+  printf '  netdev/NAPI : backlog=%s；budget=%s；budget_usecs=%s；busy_poll/read=%s/%s\n' \
+    "$backlog" "$budget" "$budget_usecs" "$busy_poll" "$busy_read"
+  printf '  conntrack   : %s\n' "$nf_label"
+  printf '  最近输出     : %s\n\n' "$(latest_output_label)"
 }
 
 show_live_status() {
@@ -767,8 +889,6 @@ interactive_menu() {
 
 function_selection_menu() {
   local choice key cursor=0 count=7 i
-  local bpftune_state="未安装"
-  command -v bpftune >/dev/null 2>&1 && bpftune_state="已安装"
   local options=(
     "bpftune-first - 安装/启用 bpftune，并只补转发/WG/Mimic/RA 缺口"
     "classic full - 经典完整优化菜单"
@@ -781,8 +901,8 @@ function_selection_menu() {
   tput civis 2>/dev/null || true
   while true; do
     banner
+    print_function_status_dashboard
     printf '%s功能选择%s\n' "$BOLD" "$RESET"
-    printf '  bpftune 状态 : %s\n' "$bpftune_state"
     printf '  默认建议     : bpftune-first，由 bpftune 主导动态调优，本脚本只补拓扑缺口。\n'
     printf '  经典模式     : 保留原固定 sysctl 生成/应用逻辑，适合没有 bpftune 包的系统。\n\n'
     printf '%s↑/↓ 或 j/k 选择，Enter 确认；也可按 1-7，q 退出%s\n\n' "$DIM" "$RESET"
@@ -858,7 +978,7 @@ Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
 固定策略为游戏低延迟 + UDP 实时优先 + 可控吞吐，不再询问容易误选的业务/目标/拓扑分支。
 
 用法:
-  bash bbr.sh             # 功能选择菜单；非交互时默认 bpftune-first
+  bash bbr.sh             # 功能状态/当前参数 + 功能选择菜单；非交互时默认 bpftune-first
   bash bbr.sh --classic   # 强制经典完整优化，上下键可视化菜单
   bash bbr.sh --quick     # 强制经典精简问答模式，只问转发场景和链路参数
   bash bbr.sh --dry-run   # 只生成配置文件，不应用
@@ -884,7 +1004,7 @@ Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
 默认不启用应用层 mux/multiplex。
 界面保留 BBR/TFO/RPS/nftables/conntrack/sysctl 等英文术语；stateful、多出口、IPv6 RA、RPS、TFO、busy_poll、会话表等自动项不再单独占主菜单。
 audit/observe 模式只读取系统计数器，不写 sysctl、不改 systemd、不加载模块。
-默认有 TTY 时进入功能选择菜单；非交互时进入 bpftune-first。
+默认有 TTY 时进入功能状态/当前参数 + 功能选择菜单；非交互时进入 bpftune-first。
 bpftune-first apply 模式下如果没有 bpftune，会默认尝试用系统包管理器安装；可用 --no-install-bpftune 禁用。
 bpftune-first 模式不写 TCP/UDP buffer、netdev backlog/budget、BBR/qdisc 或 conntrack 容量，避免和 bpftune 动态 tuner 抢控制权。
 
