@@ -43,7 +43,9 @@ log() { printf '[*] %s\n' "$*"; }
 warn() { printf '[!] %s\n' "$*" >&2; }
 die() { printf '[x] %s\n' "$*" >&2; exit 1; }
 
-if [[ -t 1 && -n "${TERM:-}" && "${TERM:-}" != "dumb" ]] && command -v tput >/dev/null 2>&1; then
+TTY_DEVICE="${TTY_DEVICE:-/dev/tty}"
+
+if { [[ -t 1 ]] || [[ -r "$TTY_DEVICE" && -w "$TTY_DEVICE" ]]; } && [[ -n "${TERM:-}" && "${TERM:-}" != "dumb" ]] && command -v tput >/dev/null 2>&1; then
   BOLD=$(tput bold || true)
   DIM=$(tput dim || true)
   GREEN=$(tput setaf 2 || true)
@@ -57,8 +59,6 @@ else
   RESET=""
 fi
 
-TTY_DEVICE="/dev/tty"
-
 restore_terminal() {
   tput cnorm 2>/dev/null || true
   stty sane 2>/dev/null || true
@@ -67,7 +67,7 @@ trap restore_terminal EXIT
 trap 'restore_terminal; exit 130' INT TERM
 
 has_tty() {
-  [[ -t 0 && -t 1 && -r "$TTY_DEVICE" && -w "$TTY_DEVICE" ]]
+  [[ -r "$TTY_DEVICE" && -w "$TTY_DEVICE" ]]
 }
 
 prompt_read() {
@@ -645,9 +645,10 @@ ask_choice() {
   local prompt="$1" default="$2" value valid label label_name label_cn i
   shift 2
   local options=("$@")
-  if has_tty && [[ -t 1 ]]; then
-    select_option "$prompt" "$default" "${options[@]}"
-    return
+  if has_tty; then
+    if select_option "$prompt" "$default" "${options[@]}"; then
+      return
+    fi
   fi
   while true; do
     printf '%s\n' "$prompt" >&2
