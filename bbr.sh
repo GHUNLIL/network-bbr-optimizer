@@ -374,6 +374,19 @@ show_live_status_body() {
   printf '\n'
 }
 
+show_live_status_preview() {
+  printf '%s系统已生效参数预览%s\n' "$BOLD" "$RESET"
+  printf '  默认网卡        : %s / RX %s / TX %s / CPU %s\n' "$DEFAULT_IFACE" "$RX_QUEUES" "$TX_QUEUES" "$CPU_COUNT"
+  print_live_sysctl net.ipv4.tcp_congestion_control
+  print_live_sysctl net.core.default_qdisc
+  print_live_sysctl net.ipv4.tcp_fastopen
+  print_live_sysctl net.ipv4.ip_forward
+  print_live_sysctl net.ipv6.conf.all.forwarding
+  print_live_sysctl net.ipv4.conf.all.rp_filter
+  printf '  %s完整列表请选 live sysctl%s\n' "$DIM" "$RESET"
+  printf '\n'
+}
+
 show_live_status() {
   banner
   show_live_status_body
@@ -486,12 +499,7 @@ interactive_menu() {
   tput civis 2>/dev/null || true
   while true; do
     banner
-    if [[ "$DRAFT_DIRTY" == "yes" ]]; then
-      show_summary
-    else
-      show_live_status_body
-    fi
-    hr
+    printf '%s主菜单%s\n' "$BOLD" "$RESET"
     printf '%s↑/↓ 或 j/k 选择，Enter 确认；也可按 1-6，q 退出%s\n\n' "$DIM" "$RESET"
     for ((i=0; i<count; i++)); do
       if (( i == cursor )); then
@@ -500,6 +508,13 @@ interactive_menu() {
         printf '    %d) %s\n' $((i + 1)) "${options[$i]}"
       fi
     done
+    printf '\n'
+    hr
+    if [[ "$DRAFT_DIRTY" == "yes" ]]; then
+      show_summary
+    else
+      show_live_status_preview
+    fi
 
     choice=""
     if read_key key; then
