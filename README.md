@@ -1,162 +1,106 @@
 # 中文 BBR 网络优化脚本（Network BBR Optimizer）
 
-中文交互式 Linux BBR 与网络转发优化脚本，默认面向游戏/实时 UDP、转发节点和上网链路；前置入口、IX 专线、线路转发/国际互联、落地家宽代理机和 AWS 建站+转发+代理混合节点都可使用，但默认优先级是响应速度，其次保留转发能力，最后才追求跑满带宽。
-
-固定目标是“游戏低延迟 + UDP 实时优先 + 可控吞吐”：负载下尽量少排队，让游戏包、语音包、SSH 和小请求优先保持响应；同时保留 BBR、内核转发、conntrack、rp_filter/IPv6 RA 处理等转发机需要的能力。应用层 mux/smux/yamux/multiplex 默认不会开启。
-
-前置、IX 和线路转发默认业务按 `UDP 游戏/实时` 处理，不只偏 TCP；落地家宽代理和 AWS 混合节点会按 `TCP+UDP 双优化` 处理。UDP socket 上限、conntrack UDP 容量、短连接回收和常见 TCP 基础能力都会一起计算，但 TCP 缓冲、`tcp_limit_output_bytes`、netdev backlog、RPS 自动开启条件会比重型转发模式更克制。
-
-新版默认更尊重内核自适应：TCP 协商能力、ECN、RTT/重排路径学习、route `initcwnd/initrwnd`、`txqueuelen`、socket 默认缓冲、keepalive 等不再硬写。脚本只清理旧版可能残留在默认路由上的 `initcwnd/initrwnd`，之后交给内核、驱动、BBR 和应用按实际路径自适应。
-
-应用新版配置时，脚本会停用旧版安装可能残留的 `initcwnd-enforcer.timer`。这个旧定时器会定期改默认路由窗口；新版会停用它并清理旧 route 窗口，让系统恢复自适应。
-
-conntrack 会区分连接上限和 hash 表大小：`nf_conntrack_max` 仍按默认转发画像、转发场景、带宽、会话量和内存预算计算，`hashsize` 会按连接上限约 `1/8` 写入。这样可以避免某些内核在 `nf_conntrack` 模块加载时，把运行态连接上限自动膨胀到脚本目标值的数倍。
-
-会话表并发强度默认保持 `balanced`：即使是转发节点，也先按低延迟游戏/实时流量处理，避免自动升到重型高并发画像后拉长队列。conntrack、nofile、listen backlog、SYN backlog、TIME_WAIT 和 netdev 队列仍会按带宽、内存、CPU、RX 队列和转发场景估算，但默认不为了测速吞吐主动放大到 `high/extreme`。
-
-`线路转发` 和 `国际互联` 在新版里合并为同一个场景：都代表跨境、长 RTT、WG/Mimic 或公网中继链路，不再给“国际互联”单独套更保守的低缓冲配置。旧版或外部脚本传入的 `international` 名称仍会兼容处理，但按 `relay` 线路转发参数计算。
-
-默认低延迟画像会收紧 `netdev_max_backlog` 与 TCP 发送队列：常见 1Gbps/80ms 输入下，TCP 缓冲上限会被压到 32MiB 内，`tcp_limit_output_bytes` 约 8MiB，`netdev_max_backlog` 通常约 32768，避免为了吞吐把小包压在长队列后面。
-
-`stateful`、落地路由、多出口/策略路由、IPv6 RA、本机是否终止 TCP 这些容易误选的拓扑项也会自动推断：脚本会结合转发场景、当前默认路由、策略路由、NAT/TProxy 规则、隧道接口、IPv6 `proto ra` 默认路由和公开 TCP 监听端口判断，并在应用后的报告里列出判断依据。
-
-如果检测到 IPv6 默认路由依赖 RA，脚本在开启 IPv6 forwarding 时会自动给默认网卡写 `accept_ra=2`，避免转发模式下内核停止接收 RA 后丢失 IPv6 默认路由。静态 IPv6 默认路由机器不会写这个接口项。
-
-脚本会在应用配置前尝试加载 `tcp_bbr` 和 `sch_fq` 模块，并写入 `/etc/modules-load.d/99-network-optimize.conf` 让它们开机加载。这样普通 BBR1 内核即使初始只显示 `cubic reno`，只要系统提供 `tcp_bbr` 模块，也会正确切到 `net.ipv4.tcp_congestion_control = bbr`。
+面向 Linux 转发节点、上网代理链路和低延迟实时流量的交互式 BBR / sysctl 优化脚本。脚本默认优先保证响应速度和 UDP 实时体验，同时保留转发、conntrack、RPS、IPv6 RA、TFO 等常见网络节点需要的自动判断能力。
 
 ## 一键运行
 
-推荐使用 `bootstrap.sh` 入口运行。入口会自动下载最新版 `bbr.sh` 并执行；默认 `auto` 模式会识别中国大陆网络，大陆服务器优先走 GitHub 代理，非大陆服务器优先直连，失败会自动换下一个地址。
-
-仍然推荐 `bash <(curl -fsSL ...)`，不要用 `curl ... | bash`。进程替换可以让交互菜单继续从终端读取输入，管道可能占用标准输入，导致上下键菜单显示不完整或无法选择。
+推荐使用 `bootstrap.sh` 入口。它会自动下载最新版 `bbr.sh` 并执行；默认会识别中国大陆网络，大陆服务器优先走 GitHub 代理，非大陆服务器优先直连，失败时自动切换备用地址。
 
 ```bash
 bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh)
 ```
 
-进入精简问答模式：
+> 推荐使用 `bash <(curl -fsSL ...)`，不要用 `curl ... | bash`。进程替换可以让交互菜单继续从终端读取输入，避免上下键菜单显示不完整或无法选择。
 
-```bash
-bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --quick
-```
+## 适用场景
 
-只生成配置、不应用到系统：
+| 场景 | 说明 | 默认侧重 |
+| --- | --- | --- |
+| `front` 前置入口 | 家里路由器或用户先进入的第一跳转发 | 实时响应、小包优先 |
+| `IX` 专线 | 专线 / IX 汇聚跳，只做极致内核转发 | 转发能力、低排队 |
+| `relay` 线路转发/国际互联 | 跨境、长 RTT、WG/Mimic 或公网中继 | 国际链路、长 RTT 适配 |
+| `landing` 落地家宽代理 | 3x-ui、Xray、GOST 等应用层出口机器 | TCP+UDP 双优化 |
+| `aws` AWS 混合节点 | 同时承担网站服务、流量转发和上网代理 | 本机服务 + 转发混合 |
 
-```bash
-bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --dry-run
-```
+`线路转发` 和 `国际互联` 在新版里合并为同一个场景：都按 `relay` 线路转发参数计算。旧版或外部脚本传入的 `international` 名称仍会兼容处理。
 
-只应用 WireGuard/Mimic 隧道必需的 sysctl，不做 BBR、RPS、队列、conntrack 大优化：
+## 默认策略
 
-```bash
-bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --wgmimic-required
-```
+- 默认场景为 `relay` 线路转发/国际互联，不再提供普通 nftables 转发兜底选项。
+- 前置、IX 和线路转发默认按 `UDP 游戏/实时` 处理；落地家宽代理和 AWS 混合节点默认按 `TCP+UDP 双优化` 处理。
+- 固定目标是低延迟、少排队、可控吞吐：优先照顾游戏包、语音包、SSH 和小请求，再保留持续吞吐能力。
+- 不默认开启应用层 mux / smux / yamux / multiplex。
+- 纯内核转发场景不会默认开启 TCP Fast Open，因为 nftables 转发不终止 TCP 连接，单边开启 TFO 对被转发连接没有实际帮助。
+- 脚本会自动判断 stateful、落地路由、多出口/策略路由、IPv6 RA、本机是否终止 TCP、RPS、TFO、busy_poll 和会话表强度。
 
-拉取并运行 `GHUNLIL/china-region-whitelist` 地区白名单脚本：
+## 运行参数
 
-```bash
-bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --china-whitelist
-```
+一键运行命令后面可以追加参数；保存后的 `bbr.sh` 也支持同样参数。
 
-强制直连 GitHub：
+| 参数 | 用途 |
+| --- | --- |
+| `--quick` | 精简问答模式，只问转发场景和链路参数 |
+| `--dry-run` | 只生成配置文件，不应用到系统 |
+| `--apply` | 生成配置后默认询问是否应用 |
+| `--wgmimic-required` | 只应用 WireGuard / Mimic 隧道必需 sysctl，不做完整网络优化 |
+| `--china-whitelist` | 拉取并运行 `GHUNLIL/china-region-whitelist` 地区白名单脚本 |
+| `--out-dir DIR` | 指定输出目录 |
+| `--clean-outputs` | 清理旧版 `bbr-output-*` 和 `/root/network-optimize-backup-*` 目录 |
+| `--help` | 查看脚本帮助 |
 
-```bash
-BBR_GITHUB_PROXY=direct bash <(curl -fsSL https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh)
-```
+如果需要调整 GitHub 访问方式，可以在运行前设置 `BBR_GITHUB_PROXY`：`direct` 表示强制直连，也可以填入自定义代理前缀，例如 `https://gh-proxy.com/`。
 
-手动指定其他 GitHub 代理：
+## 交互菜单
 
-```bash
-BBR_GITHUB_PROXY=https://gh-proxy.com/ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh)
-```
+打开脚本时，主界面优先显示当前机器已经生效的内核参数。修改转发场景或链路参数后，界面才会切换为待生效配置草案，避免把脚本默认值误认为系统当前值。
 
-## 保存后运行
+主菜单只保留常用入口：
 
-```bash
-curl -fL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh -o bootstrap.sh
-chmod +x bootstrap.sh
-if [ "$(id -u)" -eq 0 ]; then bash ./bootstrap.sh; else sudo bash ./bootstrap.sh; fi
-```
+| 菜单 | 作用 |
+| --- | --- |
+| `scene` | 选择转发场景 |
+| `bandwidth/RTT/loss` | 输入带宽、延迟、丢包和抖动 |
+| `generate/apply` | 生成配置，并确认是否应用 |
+| `live sysctl` | 查看系统已生效参数 |
+| `china-region-whitelist` | 拉取中国地区白名单脚本 |
+| `exit` | 退出 |
 
-## 运行模式
+脚本不再单独询问机器角色、优化目标、业务类型、BBR 版本假设、stateful、多出口、IPv6 RA、落地路由等容易误选的分支。这些项目会在生成配置时按转发场景、链路参数、内存、CPU、网卡队列和当前路由/防火墙状态自动推断。
 
-```bash
-bash bbr.sh                 # 上下键可视化菜单
-bash bbr.sh --quick         # 精简问答模式，只问转发场景和链路参数
-bash bbr.sh --dry-run       # 只生成配置，不应用
-bash bbr.sh --apply         # 生成配置，并询问是否应用
-bash bbr.sh --wgmimic-required # 只应用 WG/Mimic 必需 sysctl
-bash bbr.sh --china-whitelist  # 拉取并运行 china-region-whitelist
-bash bbr.sh --out-dir DIR   # 指定输出目录
-bash bbr.sh --clean-outputs # 清理旧版 bbr-output-* 和 /root/network-optimize-backup-* 目录
-bash bbr.sh --help          # 查看帮助
-```
-
-## 菜单变化
-
-打开脚本时，主界面优先显示“系统已生效参数”，也就是从当前机器实时读取到的内核配置。修改转发场景或链路参数后，界面才会切换为“待生效配置草案”，避免把脚本默认值误认为系统当前值。
-
-交互界面不再询问“机器角色”“优化目标”“业务类型”“BBR 版本假设”“stateful”“多出口/策略路由”“IPv6 RA”“落地路由”这些容易误选的分支；脚本默认按转发节点处理，固定使用响应优先、`UDP 游戏/实时` 和 BBR 自动/未知公式。RPS、TFO、busy_poll、会话表并发强度、TCP/UDP/CPS 容量都会在“生成配置并确认是否应用”时按转发场景、带宽、RTT、内存、CPU、网卡队列和当前路由/防火墙状态自动判断。
-
-界面会保留 `BBR`、`TFO`、`RPS`、`nftables`、`conntrack`、`sysctl`、`busy_poll` 等英文技术术语，但自动项不再单独占主菜单。主菜单末尾提供 `china-region-whitelist` 拉取入口，用于跳转到地区白名单防火墙脚本。
-
-如果没有修改任何参数就选择“生成配置”，脚本会先确认是否仍然使用默认草案生成。
-
-`--wgmimic-required` 是给 WireGuard + Mimic 隧道的一键最小配置：只开启 IPv4/IPv6 转发、关闭 rp_filter、关闭 redirects/source route 等会影响隧道路由的项目，不会改 BBR、队列、RPS 或 conntrack 容量。完整加速仍走普通生成/应用流程。
-
-应用完成后，脚本会打印一段“本次输入、自动选择和生成参数报告”，里面包含你输入的转发场景/带宽/RTT/丢包抖动、脚本自动判断的 stateful/落地路由/多出口/IPv6 RA/RPS/TFO/busy_poll/会话表强度和判断依据，以及最终生成的核心参数。报告也会列出哪些项目已交回系统自适应，可以整段复制给 Codex 检查是否合理。
+应用完成后，脚本会输出“本次输入、自动选择和生成参数报告”。报告包含场景、带宽、RTT、丢包抖动、自动判断依据、生成的核心参数，以及哪些项目已交回系统自适应。
 
 ## 输出目录
 
-新版默认不会继续在当前目录生成一堆 `bbr-output-*` 文件夹。
+新版默认不会在当前目录生成一堆 `bbr-output-*` 文件夹。
 
-默认输出位置：
+| 类型 | 默认位置 |
+| --- | --- |
+| 本次输出 | `$HOME/.local/state/network-bbr-optimizer/runs/<时间戳>` |
+| 最近输出链接 | `$HOME/.local/state/network-bbr-optimizer/latest` |
+| 本次备份 | `$HOME/.local/state/network-bbr-optimizer/backups/<时间戳>` |
+| 最近备份链接 | `$HOME/.local/state/network-bbr-optimizer/latest-backup` |
 
-```text
-$HOME/.local/state/network-bbr-optimizer/runs/<时间戳>
-```
+脚本应用实时配置前会生成回滚文件。
 
-最近一次输出会链接到：
+## 关键行为
 
-```text
-$HOME/.local/state/network-bbr-optimizer/latest
-```
-
-默认备份位置：
-
-```text
-$HOME/.local/state/network-bbr-optimizer/backups/<时间戳>
-```
-
-最近一次备份会链接到：
-
-```text
-$HOME/.local/state/network-bbr-optimizer/latest-backup
-```
-
-如果你想指定输出目录，可以使用：
-
-```bash
-bash bbr.sh --out-dir /root/bbr-output
-```
-
-## 默认画像说明
-
-- 脚本默认按转发节点优化，默认场景为 `relay` 线路转发/国际互联；交互菜单提供前置入口、IX 专线、线路转发/国际互联、落地家宽代理机和 AWS 建站+转发+代理混合节点，不再提供普通 nftables 转发兜底选项。
-- `landing` 会按落地节点处理，默认认为本机有代理/应用层 TCP 服务；如果检测到 NAT/TProxy、隧道接口或策略路由，会同时按路由出口预留 conntrack。
-- `aws` 会按转发节点 + 本机 TCP 服务的混合节点处理，适合同时建站、做流量转发和提供上网代理的云服务器。
-- 纯转发场景不会默认开启 TCP Fast Open，因为 nftables 内核转发不终止 TCP 连接，单边开启 TFO 对被转发连接没有实际帮助。
-- 普通纯建站或应用层服务机器也可以使用；公开 TCP 监听、NAT/TProxy、隧道接口和现有 forwarding 状态会作为自动判断依据。
-- 脚本会在应用实时配置前生成回滚文件。
-- BBR1/未知内核都会尝试启用 `bbr` 拥塞控制；脚本不再全局强写 ECN，保留内核默认策略和对端协商。
+- BBR1 / 未知内核都会尝试启用 `bbr` 拥塞控制。
+- 脚本会尝试加载 `tcp_bbr` 和 `sch_fq` 模块，并写入 `/etc/modules-load.d/99-network-optimize.conf` 让它们开机加载。
+- 脚本不再全局强写 ECN，保留内核默认策略和对端协商。
+- TCP 协商能力、RTT/重排路径学习、route `initcwnd/initrwnd`、`txqueuelen`、socket 默认缓冲和 keepalive 等默认交给内核、驱动、BBR 和应用自适应。
+- 应用新版配置时，会停用旧版可能残留的 `initcwnd-enforcer.timer`，并清理旧 route 窗口。
+- conntrack 会区分连接上限和 hash 表大小：`nf_conntrack_max` 按转发画像、场景、带宽、会话量和内存预算计算，`hashsize` 按连接上限约 `1/8` 写入。
+- 如果检测到 IPv6 默认路由依赖 RA，脚本在开启 IPv6 forwarding 时会给默认网卡写 `accept_ra=2`，避免转发模式下丢失 IPv6 默认路由。
 
 ## 术语备注
 
-- BBR：Linux TCP 拥塞控制算法。
-- sysctl：Linux 内核参数配置接口。
-- nftables：Linux 防火墙和内核转发规则框架。
-- RPS：Receive Packet Steering，用于把网卡收包处理分散到多个 CPU。
-- conntrack：连接跟踪，NAT、状态防火墙和部分转发规则会用到。
-- initcwnd / initrwnd：路由级 TCP 初始拥塞窗口和初始接收窗口；新版默认不指定，只清理旧残留。
-- nofile：进程可打开文件描述符上限。
-- TCP Fast Open / TFO：减少 TCP 建连握手延迟的机制，只对本机发起或本机终止的 TCP 连接有意义。
+| 术语 | 含义 |
+| --- | --- |
+| BBR / BBR3 | Linux TCP 拥塞控制算法 |
+| sysctl | Linux 内核参数配置接口 |
+| nftables | Linux 防火墙和内核转发规则框架 |
+| RPS | Receive Packet Steering，用于把网卡收包处理分散到多个 CPU |
+| conntrack | 连接跟踪，NAT、状态防火墙和部分转发规则会用到 |
+| initcwnd / initrwnd | 路由级 TCP 初始拥塞窗口和初始接收窗口 |
+| nofile | 进程可打开文件描述符上限 |
+| TCP Fast Open / TFO | 减少 TCP 建连握手延迟的机制，只对本机发起或本机终止的 TCP 连接有意义 |
