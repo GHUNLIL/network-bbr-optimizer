@@ -1683,6 +1683,42 @@ RP_FILTER=2
   printf '# 角色=%s 场景=%s 目标=%s 业务=%s\n\n' "$(role_label)" "$(scene_label)" "$(target_label)" "$(business_label)"
 } >> "$SYSCTL_OUT"
 
+# ip_forward 从 0 切到 1 时会按路由器画像重置 IPv4 sysctl；必须先写转发开关，再写 TCP/队列细项。
+if [[ "$ROLE" == "forwarding" || "$LANDING_ROUTES" == "yes" ]]; then
+  emit_sysctl net.ipv4.ip_forward 1
+  emit_sysctl net.ipv6.conf.all.forwarding 1
+  emit_sysctl net.ipv6.conf.default.forwarding 1
+  emit_sysctl net.ipv4.conf.all.rp_filter "$RP_FILTER"
+  emit_sysctl net.ipv4.conf.default.rp_filter "$RP_FILTER"
+  emit_sysctl "net.ipv4.conf.${DEFAULT_IFACE}.rp_filter" "$RP_FILTER"
+  emit_sysctl net.ipv4.conf.all.accept_source_route 0
+  emit_sysctl net.ipv4.conf.default.accept_source_route 0
+  emit_sysctl "net.ipv4.conf.${DEFAULT_IFACE}.accept_source_route" 0
+  emit_sysctl net.ipv4.conf.all.send_redirects 0
+  emit_sysctl net.ipv4.conf.default.send_redirects 0
+  emit_sysctl "net.ipv4.conf.${DEFAULT_IFACE}.send_redirects" 0
+  emit_sysctl net.ipv4.conf.all.accept_redirects 0
+  emit_sysctl net.ipv4.conf.default.accept_redirects 0
+  emit_sysctl "net.ipv4.conf.${DEFAULT_IFACE}.accept_redirects" 0
+  emit_sysctl net.ipv6.conf.all.accept_redirects 0
+  emit_sysctl net.ipv6.conf.default.accept_redirects 0
+  emit_sysctl "net.ipv6.conf.${DEFAULT_IFACE}.accept_redirects" 0
+  emit_sysctl net.ipv6.conf.all.accept_source_route 0
+  emit_sysctl net.ipv6.conf.default.accept_source_route 0
+  emit_sysctl "net.ipv6.conf.${DEFAULT_IFACE}.accept_source_route" 0
+  if [[ "$IPV6_RA" == "yes" ]]; then
+    printf '# IPv6 默认路由依赖 %s 的 RA：开启 forwarding 时自动保留该接口接收 RA。\n' "$DEFAULT_IFACE" >> "$SYSCTL_OUT"
+    emit_sysctl "net.ipv6.conf.${DEFAULT_IFACE}.accept_ra" 2
+  fi
+else
+  printf '# 落地节点未启用 NAT/路由：不写 ip_forward/rp_filter，保留系统或其他服务自己的网络策略。\n' >> "$SYSCTL_OUT"
+  emit_adaptive_note net.ipv4.ip_forward "纯落地机不主动覆盖"
+  emit_adaptive_note net.ipv6.conf.all.forwarding "纯落地机不主动覆盖"
+  emit_adaptive_note net.ipv6.conf.default.forwarding "纯落地机不主动覆盖"
+  emit_adaptive_note net.ipv4.conf.all.rp_filter "纯落地机不主动覆盖"
+  emit_adaptive_note net.ipv4.conf.default.rp_filter "纯落地机不主动覆盖"
+fi
+
 try_load_module tcp_bbr || true
 try_load_module sch_fq || true
 
@@ -1739,35 +1775,6 @@ emit_sysctl net.core.netdev_max_backlog "$NETDEV_BACKLOG"
 emit_sysctl net.core.netdev_budget "$NETDEV_BUDGET"
 emit_sysctl net.core.netdev_budget_usecs "$NETDEV_BUDGET_USECS"
 emit_sysctl net.core.rps_sock_flow_entries "$RPS_ENTRIES"
-
-if [[ "$ROLE" == "forwarding" || "$LANDING_ROUTES" == "yes" ]]; then
-  emit_sysctl net.ipv4.ip_forward 1
-  emit_sysctl net.ipv4.conf.all.rp_filter "$RP_FILTER"
-  emit_sysctl net.ipv4.conf.default.rp_filter "$RP_FILTER"
-  emit_sysctl net.ipv4.conf.all.accept_source_route 0
-  emit_sysctl net.ipv4.conf.default.accept_source_route 0
-  emit_sysctl net.ipv4.conf.all.send_redirects 0
-  emit_sysctl net.ipv4.conf.default.send_redirects 0
-  emit_sysctl net.ipv4.conf.all.accept_redirects 0
-  emit_sysctl net.ipv4.conf.default.accept_redirects 0
-  emit_sysctl net.ipv6.conf.all.forwarding 1
-  emit_sysctl net.ipv6.conf.default.forwarding 1
-  emit_sysctl net.ipv6.conf.all.accept_redirects 0
-  emit_sysctl net.ipv6.conf.default.accept_redirects 0
-  emit_sysctl net.ipv6.conf.all.accept_source_route 0
-  emit_sysctl net.ipv6.conf.default.accept_source_route 0
-  if [[ "$IPV6_RA" == "yes" ]]; then
-    printf '# IPv6 默认路由依赖 %s 的 RA：开启 forwarding 时自动保留该接口接收 RA。\n' "$DEFAULT_IFACE" >> "$SYSCTL_OUT"
-    emit_sysctl "net.ipv6.conf.${DEFAULT_IFACE}.accept_ra" 2
-  fi
-else
-  printf '# 落地节点未启用 NAT/路由：不写 ip_forward/rp_filter，保留系统或其他服务自己的网络策略。\n' >> "$SYSCTL_OUT"
-  emit_adaptive_note net.ipv4.ip_forward "纯落地机不主动覆盖"
-  emit_adaptive_note net.ipv6.conf.all.forwarding "纯落地机不主动覆盖"
-  emit_adaptive_note net.ipv6.conf.default.forwarding "纯落地机不主动覆盖"
-  emit_adaptive_note net.ipv4.conf.all.rp_filter "纯落地机不主动覆盖"
-  emit_adaptive_note net.ipv4.conf.default.rp_filter "纯落地机不主动覆盖"
-fi
 
 if [[ "$CT_NEEDED" == "yes" ]]; then
   emit_sysctl net.netfilter.nf_conntrack_max "$NF_CONNTRACK_MAX"
