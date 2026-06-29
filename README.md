@@ -1,10 +1,10 @@
 # 中文 BBR 网络优化脚本（Network BBR Optimizer）
 
-中文交互式 Linux BBR 与网络转发优化脚本，默认面向游戏/实时 UDP、转发节点和上网链路；专用转发、IX 专线、线路转发/国际互联仍可使用，但默认优先级是响应速度，其次保留转发能力，最后才追求跑满带宽。
+中文交互式 Linux BBR 与网络转发优化脚本，默认面向游戏/实时 UDP、转发节点和上网链路；前置入口、IX 专线、线路转发/国际互联、落地家宽代理机和 AWS 建站+转发+代理混合节点都可使用，但默认优先级是响应速度，其次保留转发能力，最后才追求跑满带宽。
 
 固定目标是“游戏低延迟 + UDP 实时优先 + 可控吞吐”：负载下尽量少排队，让游戏包、语音包、SSH 和小请求优先保持响应；同时保留 BBR、内核转发、conntrack、rp_filter/IPv6 RA 处理等转发机需要的能力。应用层 mux/smux/yamux/multiplex 默认不会开启。
 
-默认业务按 `UDP 游戏/实时` 处理，不只偏 TCP；UDP socket 上限、conntrack UDP 容量、短连接回收和常见 TCP 基础能力都会一起计算，但 TCP 缓冲、`tcp_limit_output_bytes`、netdev backlog、RPS 自动开启条件会比重型转发模式更克制。
+前置、IX 和线路转发默认业务按 `UDP 游戏/实时` 处理，不只偏 TCP；落地家宽代理和 AWS 混合节点会按 `TCP+UDP 双优化` 处理。UDP socket 上限、conntrack UDP 容量、短连接回收和常见 TCP 基础能力都会一起计算，但 TCP 缓冲、`tcp_limit_output_bytes`、netdev backlog、RPS 自动开启条件会比重型转发模式更克制。
 
 新版默认更尊重内核自适应：TCP 协商能力、ECN、RTT/重排路径学习、route `initcwnd/initrwnd`、`txqueuelen`、socket 默认缓冲、keepalive 等不再硬写。脚本只清理旧版可能残留在默认路由上的 `initcwnd/initrwnd`，之后交给内核、驱动、BBR 和应用按实际路径自适应。
 
@@ -142,9 +142,11 @@ bash bbr.sh --out-dir /root/bbr-output
 
 ## 默认画像说明
 
-- 脚本默认按转发节点优化，包括前置入口、IX 专线、线路转发/国际互联和普通 nftables 转发。
+- 脚本默认按转发节点优化，默认场景为 `relay` 线路转发/国际互联；交互菜单提供前置入口、IX 专线、线路转发/国际互联、落地家宽代理机和 AWS 建站+转发+代理混合节点，不再提供普通 nftables 转发兜底选项。
+- `landing` 会按落地节点处理，默认认为本机有代理/应用层 TCP 服务；如果检测到 NAT/TProxy、隧道接口或策略路由，会同时按路由出口预留 conntrack。
+- `aws` 会按转发节点 + 本机 TCP 服务的混合节点处理，适合同时建站、做流量转发和提供上网代理的云服务器。
 - 纯转发场景不会默认开启 TCP Fast Open，因为 nftables 内核转发不终止 TCP 连接，单边开启 TFO 对被转发连接没有实际帮助。
-- 建站或应用层服务机器也可以使用，但不是主要优化目标；这类机器的公开 TCP 监听、NAT/TProxy、隧道接口和现有 forwarding 状态会作为自动判断依据。
+- 普通纯建站或应用层服务机器也可以使用；公开 TCP 监听、NAT/TProxy、隧道接口和现有 forwarding 状态会作为自动判断依据。
 - 脚本会在应用实时配置前生成回滚文件。
 - BBR1/未知内核都会尝试启用 `bbr` 拥塞控制；脚本不再全局强写 ECN，保留内核默认策略和对端协商。
 

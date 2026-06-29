@@ -101,8 +101,8 @@ choice_label() {
     front) printf 'front 前置入口 - 家里路由器或用户先进入的第一跳转发' ;;
     ix) printf 'IX 专线 - 专线/IX 汇聚跳，只做极致内核转发' ;;
     relay) printf 'relay 线路转发/国际互联 - 跨境、长 RTT、WG/Mimic 或公网中继' ;;
+    aws) printf 'aws AWS 混合节点 - 网站服务 + 流量转发 + 上网代理' ;;
     international) printf 'international 国际互联 - 兼容旧选项，按 relay 线路转发计算' ;;
-    plain) printf 'plain 普通 nftables 转发 - 通用内核转发画像' ;;
     speed) printf 'speed 响应优先 - 游戏/实时小包优先，兼顾起速' ;;
     throughput) printf 'throughput 极致吞吐 - 更偏大流量长时间持续吞吐' ;;
     mixed) printf 'mixed TCP+UDP 双优化 - 默认同时照顾 TCP 满速和 UDP 会话' ;;
@@ -290,12 +290,12 @@ role_label() {
 }
 
 scene_label() {
-  case "${SCENE:-plain}" in
+  case "${SCENE:-relay}" in
     front) printf '前置入口' ;;
     ix) printf 'IX 专线' ;;
     relay|international) printf '线路转发/国际互联' ;;
-    plain) printf '普通 nftables 转发' ;;
-    landing) printf '落地' ;;
+    landing) printf '落地家宽代理' ;;
+    aws) printf 'AWS 建站+转发+代理' ;;
     *) printf '%s' "$SCENE" ;;
   esac
 }
@@ -427,13 +427,37 @@ clean_legacy_outputs() {
   [[ "$CLEAN_OUTPUTS" == "yes" ]] || pause_ui
 }
 
+apply_scene_defaults() {
+  case "${SCENE:-relay}" in
+    landing)
+      ROLE="landing"
+      TARGET="speed"
+      BUSINESS="mixed"
+      ;;
+    aws)
+      ROLE="forwarding"
+      TARGET="speed"
+      BUSINESS="mixed"
+      ;;
+    front|ix|relay|international)
+      ROLE="forwarding"
+      TARGET="speed"
+      BUSINESS="udp_game"
+      ;;
+    *)
+      ROLE="forwarding"
+      SCENE="relay"
+      TARGET="speed"
+      BUSINESS="udp_game"
+      ;;
+  esac
+}
+
 edit_scene() {
   banner
   printf '%sscene 转发场景%s\n' "$BOLD" "$RESET"
-  ROLE="forwarding"
-  SCENE=$(ask_choice "scene 转发场景" "${SCENE:-plain}" front ix relay plain)
-  TARGET="speed"
-  BUSINESS="udp_game"
+  SCENE=$(ask_choice "scene 转发场景" "${SCENE:-relay}" front ix relay landing aws)
+  apply_scene_defaults
   infer_auto_topology
 }
 
@@ -517,11 +541,8 @@ interactive_menu() {
 }
 
 linear_wizard() {
-  ROLE="forwarding"
-  SCENE=$(ask_choice "scene 转发场景" "$SCENE" front ix relay plain)
-
-  TARGET="speed"
-  BUSINESS="udp_game"
+  SCENE=$(ask_choice "scene 转发场景" "$SCENE" front ix relay landing aws)
+  apply_scene_defaults
 
   UP_MBPS=$(to_int "$(ask "upload/ingress Mbps 上行/入口带宽" "$UP_MBPS")")
   DOWN_MBPS=$(to_int "$(ask "download/egress Mbps 下行/出口带宽" "$DOWN_MBPS")")
@@ -548,7 +569,7 @@ usage() {
   cat <<'USAGE'
 Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
 
-交互式 Linux 网络优化脚本，默认面向转发/上网链路；建站只是兼容场景。
+交互式 Linux 网络优化脚本，默认面向转发/上网链路；支持前置、IX、国际互联、落地家宽代理和 AWS 混合节点。
 固定策略为游戏低延迟 + UDP 实时优先 + 可控吞吐，不再询问容易误选的业务/目标/拓扑分支。
 
 用法:
@@ -873,6 +894,10 @@ infer_auto_topology() {
 
   if [[ "$ROLE" == "forwarding" ]]; then
     case "$SCENE" in
+      aws)
+        MULTIPATH="yes"
+        MULTIPATH_REASON="AWS 混合节点同时承担转发、代理和本机服务，关闭 rp_filter 避免回程包误丢"
+        ;;
       front|ix|relay|international)
         MULTIPATH="yes"
         MULTIPATH_REASON="场景=$(scene_label)，默认可能存在专线/跨境/非对称回程，关闭 rp_filter"
@@ -909,7 +934,10 @@ infer_auto_topology() {
     IPV6_RA_REASON="未检测到依赖 RA 的 IPv6 默认路由"
   fi
 
-  if [[ "$ROLE" == "landing" ]]; then
+  if [[ "$SCENE" == "aws" ]]; then
+    LOCAL_TCP_TERMINATION="yes"
+    LOCAL_TCP_TERMINATION_REASON="AWS 混合节点同时承担网站服务和上网代理，默认启用本机 TCP 服务优化"
+  elif [[ "$ROLE" == "landing" ]]; then
     LOCAL_TCP_TERMINATION="yes"
     LOCAL_TCP_TERMINATION_REASON="角色=落地节点，默认本机有 Web/代理/应用层 TCP 服务"
   elif [[ "$listener" == "yes" ]]; then
@@ -1202,7 +1230,7 @@ RX_QUEUES=$(count_queues "$DEFAULT_IFACE" rx)
 TX_QUEUES=$(count_queues "$DEFAULT_IFACE" tx)
 
 ROLE="forwarding"
-SCENE="plain"
+SCENE="relay"
 TARGET="speed"
 BUSINESS="udp_game"
 CONCURRENCY_MODE="auto"
@@ -1322,6 +1350,12 @@ if [[ "$ROLE" == "forwarding" ]]; then
       UDP_SESSIONS=$((UDP_SESSIONS * 12 / 10))
       MEM_PCT=$((MEM_PCT + 6))
       ;;
+    aws)
+      TCP_CONNS=$((TCP_CONNS * 13 / 10))
+      UDP_SESSIONS=$((UDP_SESSIONS * 12 / 10))
+      CPS=$((CPS * 14 / 10))
+      MEM_PCT=$((MEM_PCT + 8))
+      ;;
   esac
 fi
 
@@ -1329,7 +1363,7 @@ CONCURRENCY_EFFECTIVE="$CONCURRENCY_MODE"
 LINK_MBPS_FOR_CONCURRENCY=$(max "$UP_MBPS" "$DOWN_MBPS")
 if [[ "$CONCURRENCY_EFFECTIVE" == "auto" ]]; then
   CONCURRENCY_EFFECTIVE="balanced"
-  if [[ "$BUSINESS" != "udp_game" && "$ROLE" == "forwarding" && "$STATEFUL" == "yes" ]] && [[ "$SCENE" == "front" || "$SCENE" == "ix" || "$SCENE" == "relay" || "$SCENE" == "international" ]] && (( LINK_MBPS_FOR_CONCURRENCY >= 100 )) && (( MEM_TOTAL_KB >= 2048 * 1024 )); then
+  if [[ "$BUSINESS" != "udp_game" && "$ROLE" == "forwarding" && "$STATEFUL" == "yes" ]] && [[ "$SCENE" == "front" || "$SCENE" == "ix" || "$SCENE" == "relay" || "$SCENE" == "international" || "$SCENE" == "aws" ]] && (( LINK_MBPS_FOR_CONCURRENCY >= 100 )) && (( MEM_TOTAL_KB >= 2048 * 1024 )); then
     CONCURRENCY_EFFECTIVE="high"
   fi
   if [[ "$BUSINESS" != "udp_game" && "$ROLE" == "forwarding" && "$STATEFUL" == "yes" && "$SCENE" == "ix" ]] \
