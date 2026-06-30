@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.20.2"
+VERSION="2026.06.30.1"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -97,18 +97,19 @@ choice_label() {
     yes) printf 'yes 是 - 开启/确认' ;;
     no) printf 'no 否 - 关闭/不启用' ;;
     forwarding) printf 'forwarding 转发节点 - nftables/路由内核转发机器' ;;
-    landing) printf 'landing 落地节点 - 3x-ui/Xray/GOST 等应用层出口机器' ;;
-    front) printf 'front 前置入口 - 家里路由器或用户先进入的第一跳转发' ;;
-    ix) printf 'IX 专线 - 专线/IX 汇聚跳，只做极致内核转发' ;;
-    relay) printf 'relay 线路转发/国际互联 - 跨境、长 RTT、WG/Mimic 或公网中继' ;;
-    aws) printf 'aws AWS 混合节点 - 网站服务 + 流量转发 + 上网代理' ;;
-    international) printf 'international 国际互联 - 兼容旧选项，按 relay 线路转发计算' ;;
+    front) printf 'front 前置入口 - 用户进入的第一跳转发' ;;
+    relay) printf 'relay 中继转发 - 跨网、跨境、WG/Mimic 或公网中继' ;;
+    ix) printf 'ix 专线/IX 转发 - 专线/IX 汇聚，低抖动转发' ;;
+    landing) printf 'landing 落地出口 - 本机代理/隧道出口，终止 TCP/UDP 会话' ;;
+    hybrid) printf 'hybrid 混合网络节点 - 本机终止和转发链路并存' ;;
+    aws) printf 'aws 兼容旧选项 - 按 hybrid 混合网络节点计算' ;;
+    international) printf 'international 兼容旧选项 - 按 relay 中继转发计算' ;;
     speed) printf 'speed 响应优先 - 游戏/实时小包优先，兼顾起速' ;;
     throughput) printf 'throughput 极致吞吐 - 更偏大流量长时间持续吞吐' ;;
     mixed) printf 'mixed TCP+UDP 双优化 - 默认同时照顾 TCP 满速和 UDP 会话' ;;
     tcp) printf 'tcp TCP 长连接 - 长连接、代理隧道或大流量 TCP' ;;
     udp_game) printf 'udp_game UDP 游戏/实时 - 游戏、语音、实时 UDP，默认低排队' ;;
-    web) printf 'web Web/HTTPS - 网站、API、短连接 HTTPS' ;;
+    web) printf 'web HTTP/API - HTTP、API、短连接 HTTPS 流量' ;;
     balanced) printf 'balanced 均衡并发 - 按带宽/内存自动估算会话表' ;;
     high) printf 'high 高并发 - 提高 conntrack/nofile/backlog 容量' ;;
     extreme) printf 'extreme 极高并发 - 更激进提高会话容量，仍受内存保护' ;;
@@ -135,6 +136,14 @@ choice_short_label() {
     bbr3) printf 'BBR3' ;;
     unknown) printf '未知' ;;
     *) printf '%s' "$1" ;;
+  esac
+}
+
+normalize_scene_choice() {
+  case "${1:-}" in
+    aws) printf 'hybrid' ;;
+    international) printf 'relay' ;;
+    *) printf '%s' "${1:-}" ;;
   esac
 }
 
@@ -292,10 +301,10 @@ role_label() {
 scene_label() {
   case "${SCENE:-relay}" in
     front) printf '前置入口' ;;
-    ix) printf 'IX 专线' ;;
-    relay|international) printf '线路转发/国际互联' ;;
-    landing) printf '落地家宽代理' ;;
-    aws) printf 'AWS 建站+转发+代理' ;;
+    relay|international) printf '中继转发' ;;
+    ix) printf '专线/IX 转发' ;;
+    landing) printf '落地出口' ;;
+    hybrid|aws) printf '混合网络节点' ;;
     *) printf '%s' "$SCENE" ;;
   esac
 }
@@ -313,7 +322,7 @@ business_label() {
     mixed) printf 'TCP+UDP 双优化' ;;
     tcp) printf 'TCP 长连接' ;;
     udp_game) printf 'UDP 游戏/实时' ;;
-    web) printf 'Web/HTTPS' ;;
+    web) printf 'HTTP/API 短连接' ;;
     *) printf '%s' "$BUSINESS" ;;
   esac
 }
@@ -441,18 +450,19 @@ clean_legacy_outputs() {
 }
 
 apply_scene_defaults() {
+  SCENE="$(normalize_scene_choice "${SCENE:-relay}")"
   case "${SCENE:-relay}" in
     landing)
       ROLE="landing"
       TARGET="speed"
       BUSINESS="mixed"
       ;;
-    aws)
+    hybrid)
       ROLE="forwarding"
       TARGET="speed"
       BUSINESS="mixed"
       ;;
-    front|ix|relay|international)
+    front|ix|relay)
       ROLE="forwarding"
       TARGET="speed"
       BUSINESS="udp_game"
@@ -469,7 +479,7 @@ apply_scene_defaults() {
 edit_scene() {
   banner
   printf '%sscene 转发场景%s\n' "$BOLD" "$RESET"
-  SCENE=$(ask_choice "scene 转发场景" "${SCENE:-relay}" front ix relay landing aws)
+  SCENE=$(ask_choice "scene 转发场景" "${SCENE:-relay}" front relay ix landing hybrid)
   apply_scene_defaults
   infer_auto_topology
 }
@@ -556,7 +566,7 @@ interactive_menu() {
 }
 
 linear_wizard() {
-  SCENE=$(ask_choice "scene 转发场景" "$SCENE" front ix relay landing aws)
+  SCENE=$(ask_choice "scene 转发场景" "$SCENE" front relay ix landing hybrid)
   apply_scene_defaults
 
   UP_MBPS=$(to_int "$(ask "upload/ingress Mbps 上行/入口带宽" "$UP_MBPS")")
@@ -584,7 +594,7 @@ usage() {
   cat <<'USAGE'
 Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
 
-交互式 Linux 网络优化脚本，默认面向转发/上网链路；支持前置、IX、国际互联、落地家宽代理和 AWS 混合节点。
+交互式 Linux 网络优化脚本，默认面向转发/上网链路；支持前置入口、中继转发、专线/IX 转发、落地出口和混合网络节点。
 固定策略为游戏低延迟 + UDP 实时优先 + 可控吞吐，不再询问容易误选的业务/目标/拓扑分支。
 
 用法:
@@ -657,7 +667,7 @@ ask_yes_no() {
 }
 
 ask_choice() {
-  local prompt="$1" default="$2" value valid label label_name label_cn i
+  local prompt="$1" default="$2" value normalized valid label label_name label_cn i
   shift 2
   local options=("$@")
   if has_tty; then
@@ -686,6 +696,13 @@ ask_choice() {
         label_cn=""
       fi
       if [[ "$value" == "$valid" || "$value" == "$label" || "$value" == "$label_name" || "$value" == "$label_cn" ]]; then
+        printf '%s' "$valid"
+        return
+      fi
+    done
+    normalized="$(normalize_scene_choice "$value")"
+    for valid in "${options[@]}"; do
+      if [[ "$normalized" == "$valid" ]]; then
         printf '%s' "$valid"
         return
       fi
@@ -784,8 +801,16 @@ mem_kb() {
 }
 
 detect_default_iface() {
+  local iface
   command -v ip >/dev/null 2>&1 || return 0
-  ip route show default 2>/dev/null | awk '{
+  iface="$(ip route show default 2>/dev/null | awk '{
+    for (i=1; i<=NF; i++) if ($i == "dev") { print $(i+1); exit }
+  }')"
+  if [[ -n "$iface" ]]; then
+    printf '%s\n' "$iface"
+    return 0
+  fi
+  ip -6 route show default 2>/dev/null | awk '{
     for (i=1; i<=NF; i++) if ($i == "dev") { print $(i+1); exit }
   }'
 }
@@ -880,6 +905,7 @@ has_public_tcp_listener() {
 
 infer_auto_topology() {
   local v4_defaults v6_defaults policy nat tunnel forwarding listener
+  SCENE="$(normalize_scene_choice "${SCENE:-relay}")"
   v4_defaults="$(default_route_count 4)"
   v6_defaults="$(default_route_count 6)"
   policy="no"; policy_routing_present && policy="yes"
@@ -910,11 +936,11 @@ infer_auto_topology() {
 
   if [[ "$ROLE" == "forwarding" ]]; then
     case "$SCENE" in
-      aws)
+      hybrid)
         MULTIPATH="yes"
-        MULTIPATH_REASON="AWS 混合节点同时承担转发、代理和本机服务，关闭 rp_filter 避免回程包误丢"
+        MULTIPATH_REASON="混合网络节点同时存在本机终止和转发链路，关闭 rp_filter 避免回程包误丢"
         ;;
-      front|ix|relay|international)
+      front|ix|relay)
         MULTIPATH="yes"
         MULTIPATH_REASON="场景=$(scene_label)，默认可能存在专线/跨境/非对称回程，关闭 rp_filter"
         ;;
@@ -950,12 +976,12 @@ infer_auto_topology() {
     IPV6_RA_REASON="未检测到依赖 RA 的 IPv6 默认路由"
   fi
 
-  if [[ "$SCENE" == "aws" ]]; then
+  if [[ "$SCENE" == "hybrid" ]]; then
     LOCAL_TCP_TERMINATION="yes"
-    LOCAL_TCP_TERMINATION_REASON="AWS 混合节点同时承担网站服务和上网代理，默认启用本机 TCP 服务优化"
+    LOCAL_TCP_TERMINATION_REASON="混合网络节点包含本机 TCP/UDP 终止，启用本机连接优化"
   elif [[ "$ROLE" == "landing" ]]; then
     LOCAL_TCP_TERMINATION="yes"
-    LOCAL_TCP_TERMINATION_REASON="角色=落地节点，默认本机有 Web/代理/应用层 TCP 服务"
+    LOCAL_TCP_TERMINATION_REASON="角色=落地出口，默认本机代理/隧道出口会终止连接"
   elif [[ "$listener" == "yes" ]]; then
     LOCAL_TCP_TERMINATION="yes"
     LOCAL_TCP_TERMINATION_REASON="检测到非 SSH 的公开 TCP 监听端口，启用本机 TFO 相关优化"
@@ -1361,12 +1387,12 @@ if [[ "$ROLE" == "forwarding" ]]; then
       CPS=$((CPS * 18 / 10))
       MEM_PCT=$((MEM_PCT + 12))
       ;;
-    relay|international)
+    relay)
       TCP_CONNS=$((TCP_CONNS * 12 / 10))
       UDP_SESSIONS=$((UDP_SESSIONS * 12 / 10))
       MEM_PCT=$((MEM_PCT + 6))
       ;;
-    aws)
+    hybrid)
       TCP_CONNS=$((TCP_CONNS * 13 / 10))
       UDP_SESSIONS=$((UDP_SESSIONS * 12 / 10))
       CPS=$((CPS * 14 / 10))
@@ -1379,7 +1405,7 @@ CONCURRENCY_EFFECTIVE="$CONCURRENCY_MODE"
 LINK_MBPS_FOR_CONCURRENCY=$(max "$UP_MBPS" "$DOWN_MBPS")
 if [[ "$CONCURRENCY_EFFECTIVE" == "auto" ]]; then
   CONCURRENCY_EFFECTIVE="balanced"
-  if [[ "$BUSINESS" != "udp_game" && "$ROLE" == "forwarding" && "$STATEFUL" == "yes" ]] && [[ "$SCENE" == "front" || "$SCENE" == "ix" || "$SCENE" == "relay" || "$SCENE" == "international" || "$SCENE" == "aws" ]] && (( LINK_MBPS_FOR_CONCURRENCY >= 100 )) && (( MEM_TOTAL_KB >= 2048 * 1024 )); then
+  if [[ "$BUSINESS" != "udp_game" && "$ROLE" == "forwarding" && "$STATEFUL" == "yes" ]] && [[ "$SCENE" == "front" || "$SCENE" == "ix" || "$SCENE" == "relay" || "$SCENE" == "hybrid" ]] && (( LINK_MBPS_FOR_CONCURRENCY >= 100 )) && (( MEM_TOTAL_KB >= 2048 * 1024 )); then
     CONCURRENCY_EFFECTIVE="high"
   fi
   if [[ "$BUSINESS" != "udp_game" && "$ROLE" == "forwarding" && "$STATEFUL" == "yes" && "$SCENE" == "ix" ]] \
@@ -1468,7 +1494,7 @@ if (( LOSS_BP >= 100 )) || [[ "$JITTER_GUARD" == "yes" ]] || [[ "$BUSINESS" == "
   if [[ "$BUSINESS" == "udp_game" ]]; then
     BDP_MULT=$(min "$BDP_MULT" 6)
     NETDEV_BACKLOG_CAP=65536
-    NETDEV_BUDGET_USECS_CAP=5000
+    NETDEV_BUDGET_USECS_CAP=10000
   else
     BDP_MULT=$(min "$BDP_MULT" 12)
     NETDEV_BACKLOG_CAP=524288
@@ -1570,7 +1596,7 @@ UDPR=$(clamp "$UDPR" "$MIB" "$UDP_SOCKET_CAP")
 UDP_MIN=4096
 [[ "$BUSINESS" == "mixed" ]] && UDP_MIN=16384
 [[ "$BUSINESS" == "udp_game" ]] && UDP_MIN=16384
-if [[ "$TARGET" == "throughput" || "$UDP_SESSIONS" -gt 50000 ]]; then UDP_MIN=8192; fi
+if [[ "$TARGET" == "throughput" || "$UDP_SESSIONS" -gt 50000 ]]; then UDP_MIN=$(max "$UDP_MIN" 8192); fi
 UDP_MIN=$(clamp "$UDP_MIN" 4096 65536)
 UDP_MAX_PAGES=$((MEM_AVAIL_KB * MEM_PCT / 400))
 UDP_FLOOR=$(max $(( ($(ceil_div "$UDPR" 4096)) * 4 )) 4096)
@@ -1663,16 +1689,41 @@ NETDEV_BUDGET_USECS=$(clamp 10000 1 "$NETDEV_BUDGET_USECS_CAP")
 [[ "$TARGET" == "throughput" ]] && NETDEV_BUDGET_USECS=$(clamp 12000 1 "$NETDEV_BUDGET_USECS_CAP")
 
 RPS_ENABLE="no"
-if [[ "$BUSINESS" == "udp_game" ]]; then
-  if (( RX_QUEUES < CPU_COUNT && CPU_COUNT >= 4 && MBW >= 1000 )); then
+if (( CPU_COUNT >= 2 )); then
+  if [[ "$SCENE" == "hybrid" || "$ROLE" == "landing" ]]; then
+    if (( RX_QUEUES <= CPU_COUNT )); then
+      RPS_ENABLE="yes"
+    fi
+  elif [[ "$BUSINESS" == "udp_game" ]]; then
+    if (( RX_QUEUES < CPU_COUNT && CPU_COUNT >= 4 && MBW >= 1000 )); then
+      RPS_ENABLE="yes"
+    fi
+  elif (( RX_QUEUES < CPU_COUNT )); then
     RPS_ENABLE="yes"
   fi
-elif (( RX_QUEUES < CPU_COUNT && CPU_COUNT >= 2 )); then
-  RPS_ENABLE="yes"
 fi
 RPS_ENTRIES=$(clamp "$FLOW_LIMIT" 32768 2097152)
 RPS_FLOW_CNT=$(clamp $((RPS_ENTRIES / RX_QUEUES)) 1024 65536)
 RPS_CPUS=$(cpumask_all "$CPU_COUNT")
+
+TCP_NOTSENT_LOWAT=""
+if [[ "$LOCAL_TCP_TERMINATION" == "yes" ]] && [[ "$SCENE" == "hybrid" || "$ROLE" == "landing" ]]; then
+  if (( MEM_TOTAL_KB < 1024 * 1024 )); then
+    TCP_NOTSENT_LOWAT=$(clamp $((TCP_LIMIT / 2)) $((512 * 1024)) "$MIB")
+  elif (( MEM_TOTAL_KB < 2048 * 1024 )); then
+    TCP_NOTSENT_LOWAT=$(clamp $((TCP_LIMIT / 2)) "$MIB" $((2 * MIB)))
+  fi
+fi
+
+TCP_SLOW_START_AFTER_IDLE=""
+if [[ "$LOCAL_TCP_TERMINATION" == "yes" && "$BUSINESS" != "udp_game" ]]; then
+  TCP_SLOW_START_AFTER_IDLE=0
+fi
+
+TCP_NO_METRICS_SAVE=""
+if [[ "$MULTIPATH" == "yes" ]] && [[ "$SCENE" == "front" || "$SCENE" == "hybrid" || "$LANDING_ROUTES" == "yes" ]]; then
+  TCP_NO_METRICS_SAVE=1
+fi
 
 RP_FILTER=2
 [[ "$MULTIPATH" == "yes" ]] && RP_FILTER=0
@@ -1741,8 +1792,16 @@ emit_adaptive_note net.ipv4.tcp_sack "TCP 能力由内核和对端协商"
 emit_adaptive_note net.ipv4.tcp_dsack "TCP 能力由内核和对端协商"
 emit_adaptive_note net.ipv4.tcp_moderate_rcvbuf "TCP 接收缓冲由内核自动调节"
 emit_sysctl net.core.optmem_max "$OPTMEM"
-emit_adaptive_note net.ipv4.tcp_notsent_lowat "应用/内核按连接发送队列自适应，避免固定 lowat 影响不同服务"
-emit_adaptive_note net.ipv4.tcp_slow_start_after_idle "保留内核默认 idle 后慢启动，避免小带宽链路突发排队"
+if [[ -n "$TCP_NOTSENT_LOWAT" ]]; then
+  emit_sysctl net.ipv4.tcp_notsent_lowat "$TCP_NOTSENT_LOWAT"
+else
+  emit_adaptive_note net.ipv4.tcp_notsent_lowat "未触发小内存本机终止/落地条件，保留应用/内核发送队列自适应"
+fi
+if [[ -n "$TCP_SLOW_START_AFTER_IDLE" ]]; then
+  emit_sysctl net.ipv4.tcp_slow_start_after_idle "$TCP_SLOW_START_AFTER_IDLE"
+else
+  emit_adaptive_note net.ipv4.tcp_slow_start_after_idle "未触发本机 TCP 终止条件，保留内核默认 idle 后慢启动"
+fi
 emit_adaptive_note net.ipv4.tcp_min_rtt_wlen "BBR/内核按路径学习 RTT，不固定观察窗口"
 emit_adaptive_note net.ipv4.tcp_max_reordering "重排容忍由内核按路径学习，不固定全局阈值"
 emit_adaptive_note net.ipv4.tcp_ecn "ECN 由内核默认策略和对端协商，不全局强制开关"
@@ -1755,7 +1814,11 @@ else
 fi
 emit_sysctl net.ipv4.tcp_mtu_probing 1
 emit_sysctl net.ipv4.tcp_rfc1337 1
-emit_adaptive_note net.ipv4.tcp_no_metrics_save "保留内核目的地 metrics 学习能力"
+if [[ -n "$TCP_NO_METRICS_SAVE" ]]; then
+  emit_sysctl net.ipv4.tcp_no_metrics_save "$TCP_NO_METRICS_SAVE"
+else
+  emit_adaptive_note net.ipv4.tcp_no_metrics_save "未触发前置/混合/落地路由多路径条件，保留内核目的地 metrics 学习能力"
+fi
 emit_sysctl net.ipv4.tcp_tw_reuse 1
 emit_sysctl net.ipv4.tcp_max_tw_buckets "$TW_BUCKETS"
 emit_sysctl net.ipv4.tcp_fin_timeout "$FIN_TIMEOUT"
@@ -1936,6 +1999,9 @@ BDP倍数=$BDP_MULT
 TCP缓冲上限=$TCP_MAX
 socket默认缓冲=系统默认（不写 rmem_default/wmem_default）
 tcp_limit_output_bytes=$TCP_LIMIT
+tcp_notsent_lowat=${TCP_NOTSENT_LOWAT:-系统默认（不写入）}
+tcp_slow_start_after_idle=${TCP_SLOW_START_AFTER_IDLE:-系统默认（不写入）}
+tcp_no_metrics_save=${TCP_NO_METRICS_SAVE:-系统默认（不写入）}
 initcwnd=系统默认（仅清理旧 route initcwnd 残留）
 initrwnd=系统默认（仅清理旧 route initrwnd 残留）
 nofile=$NOFILE
@@ -1951,8 +2017,9 @@ nf_conntrack_hashsize=$NF_CONNTRACK_BUCKETS
 
 [系统自适应保留]
 TCP协商能力=tcp_window_scaling/timestamps/sack/dsack 不写入
-TCP路径学习=tcp_min_rtt_wlen/tcp_max_reordering/tcp_no_metrics_save 不写入
-发送队列细节=tcp_notsent_lowat/route initcwnd/txqueuelen 不写入
+TCP路径学习=tcp_min_rtt_wlen/tcp_max_reordering 默认不写；tcp_no_metrics_save 只在前置/混合/落地路由多路径条件触发
+发送队列细节=route initcwnd/txqueuelen 不写；tcp_notsent_lowat 只在小内存本机终止/落地条件触发
+idle后慢启动=tcp_slow_start_after_idle 只在本机 TCP 终止且非纯 UDP 实时条件触发
 应用心跳=tcp_keepalive_time/intvl/probes 不写入
 纯落地机网络状态=不强行写 ip_forward=0/rp_filter
 
