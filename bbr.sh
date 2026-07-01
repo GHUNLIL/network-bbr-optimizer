@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.07.01.1"
+VERSION="2026.07.01.2"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -1105,9 +1105,14 @@ backup_file() {
   fi
 }
 
+script_owned_sysctl_key_ere() {
+  printf '%s' 'fs\.file-max|net\.core\.(default_qdisc|rmem_max|wmem_max|rmem_default|wmem_default|optmem_max|somaxconn|flow_limit_table_len|netdev_max_backlog|netdev_budget|netdev_budget_usecs|rps_sock_flow_entries|busy_poll|busy_read)|net\.ipv4\.(tcp_[[:alnum:]_]+|udp_[[:alnum:]_]+|ip_forward|ip_local_port_range|conf\..*\.(rp_filter|accept_source_route|send_redirects|accept_redirects))|net\.ipv6\.conf\..*\.(forwarding|accept_ra|accept_redirects|accept_source_route)|net\.netfilter\.(nf_conntrack_max|nf_conntrack_tcp_timeout_established|nf_conntrack_udp_timeout|nf_conntrack_udp_timeout_stream)'
+}
+
 sysctl_file_has_script_owned_network_keys() {
-  local file="$1"
-  grep -Eiq '^[[:space:]]*(fs\.file-max|net\.core\.(default_qdisc|rmem_max|wmem_max|rmem_default|wmem_default|optmem_max|somaxconn|flow_limit_table_len|netdev_max_backlog|netdev_budget|netdev_budget_usecs|rps_sock_flow_entries|busy_poll|busy_read)|net\.ipv4\.(tcp_[[:alnum:]_]+|udp_[[:alnum:]_]+|ip_forward|ip_local_port_range|conf\..*\.(rp_filter|accept_source_route|send_redirects|accept_redirects))|net\.ipv6\.conf\..*\.(forwarding|accept_ra|accept_redirects|accept_source_route)|net\.netfilter\.nf_conntrack[[:alnum:]_]*)[[:space:]]*=' "$file"
+  local file="$1" owned_re
+  owned_re="$(script_owned_sysctl_key_ere)"
+  grep -Eiq "^[[:space:]]*(${owned_re})[[:space:]]*=" "$file"
 }
 
 is_takeover_sysctl_file() {
@@ -1120,6 +1125,51 @@ is_takeover_sysctl_file() {
   [[ "$base" == *.disabled* || "$base" == *.bak* || "$base" == *.old || "$base" == *.orig* || "$base" == *.save* ]] && return 1
 
   sysctl_file_has_script_owned_network_keys "$file"
+}
+
+take_over_sysctl_conf_keys() {
+  local backup_dir="$1" conf="/etc/sysctl.conf" key_file tmp owned_re
+  [[ -f "$conf" ]] || return 0
+
+  key_file="$backup_dir/.network-optimize-taken-over-sysctl-conf-keys"
+  tmp="$backup_dir/.network-optimize-sysctl.conf.tmp"
+  owned_re="$(script_owned_sysctl_key_ere)"
+
+  awk -v owned_re="$owned_re" '
+    /^[[:space:]]*($|#)/ { next }
+    {
+      key=$0
+      sub(/[[:space:]]*=.*/, "", key)
+      gsub(/[[:space:]]/, "", key)
+      if (key ~ "^(" owned_re ")$") {
+        print key
+      }
+    }
+  ' "$conf" > "$key_file"
+
+  if [[ ! -s "$key_file" ]]; then
+    rm -f "$key_file" "$tmp"
+    return 0
+  fi
+
+  backup_file "$conf" "$backup_dir"
+  awk -v owned_re="$owned_re" '
+    /^[[:space:]]*#/ { print; next }
+    {
+      key=$0
+      sub(/[[:space:]]*=.*/, "", key)
+      gsub(/[[:space:]]/, "", key)
+      if (key ~ "^(" owned_re ")$") {
+        print "# network-bbr-optimizer: moved to /etc/sysctl.d/99-network-optimize.conf"
+        print "# " $0
+        next
+      }
+      print
+    }
+  ' "$conf" > "$tmp"
+  cat "$tmp" > "$conf"
+  rm -f "$tmp"
+  warn "已备份并注释 /etc/sysctl.conf 中脚本接管的 sysctl 项。"
 }
 
 take_over_sysctl_files() {
@@ -1142,31 +1192,47 @@ take_over_sysctl_files() {
   if (( count == 0 )); then
     rm -f "$list_file"
   fi
+
+  take_over_sysctl_conf_keys "$backup_dir"
 }
 
 print_sysctl_takeover_summary() {
-  local backup_dir="$1" list_file path count=0
+  local backup_dir="$1" list_file conf_key_file path key file_count=0 key_count=0
   list_file="$backup_dir/.network-optimize-taken-over-sysctl-files"
+  conf_key_file="$backup_dir/.network-optimize-taken-over-sysctl-conf-keys"
 
   printf '\n统一接管 sysctl:\n'
   printf '  主配置: /etc/sysctl.d/99-network-optimize.conf\n'
-  if [[ ! -s "$list_file" ]]; then
+  if [[ ! -s "$list_file" && ! -s "$conf_key_file" ]]; then
     printf '  结果: 未发现其它写入脚本负责网络优化参数的 sysctl 文件。\n'
     return 0
   fi
 
-  while IFS= read -r path; do
-    [[ -n "$path" ]] || continue
-    count=$((count + 1))
-  done < "$list_file"
-
-  printf '  结果: 已接管 %d 个其它 sysctl 文件，均已备份。\n' "$count"
   printf '  回滚: 运行本次输出目录里的 rollback.sh 会恢复这些文件。\n'
-  printf '  列表:\n'
-  while IFS= read -r path; do
-    [[ -n "$path" ]] || continue
-    printf '    - %s\n' "$path"
-  done < "$list_file"
+
+  if [[ -s "$list_file" ]]; then
+    while IFS= read -r path; do
+      [[ -n "$path" ]] || continue
+      file_count=$((file_count + 1))
+    done < "$list_file"
+    printf '  sysctl.d: 已接管 %d 个其它 sysctl 文件，均已备份。\n' "$file_count"
+    while IFS= read -r path; do
+      [[ -n "$path" ]] || continue
+      printf '    - %s\n' "$path"
+    done < "$list_file"
+  fi
+
+  if [[ -s "$conf_key_file" ]]; then
+    while IFS= read -r key; do
+      [[ -n "$key" ]] || continue
+      key_count=$((key_count + 1))
+    done < "$conf_key_file"
+    printf '  /etc/sysctl.conf: 已注释 %d 个脚本负责的 sysctl 项，原文件已备份。\n' "$key_count"
+    while IFS= read -r key; do
+      [[ -n "$key" ]] || continue
+      printf '    - %s\n' "$key"
+    done < "$conf_key_file"
+  fi
 }
 
 install_file() {
@@ -1204,6 +1270,9 @@ if [[ -f "\$BACKUP_DIR/.network-optimize-taken-over-sysctl-files" ]]; then
     [[ -n "\$path" ]] || continue
     restore_or_remove "\$path"
   done < "\$BACKUP_DIR/.network-optimize-taken-over-sysctl-files"
+fi
+if [[ -f "\$BACKUP_DIR/.network-optimize-taken-over-sysctl-conf-keys" ]]; then
+  restore_or_remove /etc/sysctl.conf
 fi
 EOF
   if [[ -n "${SERVICE_NAME:-}" ]]; then
@@ -2098,8 +2167,8 @@ idle后慢启动=tcp_slow_start_after_idle 只在本机 TCP 终止且非纯 UDP 
 纯落地机网络状态=不强行写 ip_forward=0/rp_filter
 
 [统一接管]
-应用时会备份并移除 /etc/sysctl.d 中其它写入脚本负责网络优化参数的 sysctl 文件，让 /etc/sysctl.d/99-network-optimize.conf 成为唯一主配置。
-匹配方式=不按旧文件名固定判断；只要其它 .conf 写入本脚本负责的 BBR/TCP/UDP/qdisc/buffer/forwarding/rp_filter/conntrack/backlog/RPS/busy_poll/file-max 等 sysctl key，就交给脚本接管。
+应用时会备份并移除 /etc/sysctl.d 中其它写入脚本负责网络优化参数的 sysctl 文件，并注释 /etc/sysctl.conf 中脚本负责的单行，让 /etc/sysctl.d/99-network-optimize.conf 成为唯一主配置。
+匹配方式=不按旧文件名固定判断；只要其它 .conf 或 /etc/sysctl.conf 写入本脚本负责的 BBR/TCP/UDP/qdisc/buffer/forwarding/rp_filter/conntrack/backlog/RPS/busy_poll/file-max 等 sysctl key，就交给脚本接管。
 保护范围=保留 99-network-optimize.conf、98-wgmimic-required.conf、README 以及 disabled/bak/old/orig/save 文件。
 输出=应用完成后终端直接显示接管摘要和列表，不另生成接管报告文件。
 回滚=rollback.sh 会恢复被接管移除的文件。

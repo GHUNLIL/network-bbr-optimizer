@@ -91,7 +91,7 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL
 - 脚本不再全局强写 ECN，保留内核默认策略和对端协商。
 - TCP 协商能力、RTT/重排路径学习、route `initcwnd/initrwnd`、`txqueuelen`、socket 默认缓冲和 keepalive 等默认交给内核、驱动、BBR 和应用自适应。
 - 应用新版配置时，会停用旧版可能残留的 `initcwnd-enforcer.timer`，并清理旧 route 窗口。
-- 应用新版配置时，会备份并移除 `/etc/sysctl.d` 中其它写入本脚本负责网络优化参数的 sysctl 文件，让 `/etc/sysctl.d/99-network-optimize.conf` 成为唯一主配置。匹配按 sysctl key 自动识别，不按旧文件名写死；`98-wgmimic-required.conf`、README、以及 disabled/bak/old/orig/save 文件会保留。接管结果会直接显示在终端总结里，不需要查看单独报告文件，回滚脚本会恢复被接管移除的文件。
+- 应用新版配置时，会备份并移除 `/etc/sysctl.d` 中其它写入本脚本负责网络优化参数的 sysctl 文件，并备份后注释 `/etc/sysctl.conf` 中脚本负责的单行，让 `/etc/sysctl.d/99-network-optimize.conf` 成为唯一主配置。匹配按 sysctl key 自动识别，不按旧文件名写死；`98-wgmimic-required.conf`、README、以及 disabled/bak/old/orig/save 文件会保留。接管结果会直接显示在终端总结里，不需要查看单独报告文件，回滚脚本会恢复被接管移除/注释前的文件。
 - conntrack 会区分连接上限和 hash 表大小：`nf_conntrack_max` 按转发画像、场景、带宽、会话量和内存预算计算，`hashsize` 按连接上限约 `1/8` 写入。
 - 如果检测到 IPv6 默认路由依赖 RA，脚本在开启 IPv6 forwarding 时会给默认网卡写 `accept_ra=2`，避免转发模式下丢失 IPv6 默认路由。
 
