@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.06.30.1"
+VERSION="2026.07.01.1"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -45,12 +45,18 @@ die() { printf '[x] %s\n' "$*" >&2; exit 1; }
 
 TTY_DEVICE="${TTY_DEVICE:-/dev/tty}"
 
-if { [[ -t 1 ]] || [[ -r "$TTY_DEVICE" && -w "$TTY_DEVICE" ]]; } && [[ -n "${TERM:-}" && "${TERM:-}" != "dumb" ]] && command -v tput >/dev/null 2>&1; then
-  BOLD=$(tput bold || true)
-  DIM=$(tput dim || true)
-  GREEN=$(tput setaf 2 || true)
-  CYAN=$(tput setaf 6 || true)
-  RESET=$(tput sgr0 || true)
+has_tty() {
+  [[ -n "${TTY_DEVICE:-}" ]] || return 1
+  { : < "$TTY_DEVICE"; } 2>/dev/null || return 1
+  { : > "$TTY_DEVICE"; } 2>/dev/null || return 1
+}
+
+if has_tty && [[ -n "${TERM:-}" && "${TERM:-}" != "dumb" && "${TERM:-}" != "unknown" ]] && command -v tput >/dev/null 2>&1; then
+  BOLD=$(tput bold 2>/dev/null || true)
+  DIM=$(tput dim 2>/dev/null || true)
+  GREEN=$(tput setaf 2 2>/dev/null || true)
+  CYAN=$(tput setaf 6 2>/dev/null || true)
+  RESET=$(tput sgr0 2>/dev/null || true)
 else
   BOLD=""
   DIM=""
@@ -60,15 +66,13 @@ else
 fi
 
 restore_terminal() {
-  tput cnorm 2>/dev/null || true
-  stty sane 2>/dev/null || true
+  if has_tty; then
+    tput cnorm 2>/dev/null || true
+    stty sane 2>/dev/null || true
+  fi
 }
 trap restore_terminal EXIT
 trap 'restore_terminal; exit 130' INT TERM
-
-has_tty() {
-  [[ -r "$TTY_DEVICE" && -w "$TTY_DEVICE" ]]
-}
 
 prompt_read() {
   local __var="$1" prompt="$2"
