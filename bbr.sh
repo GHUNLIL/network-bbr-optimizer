@@ -1119,10 +1119,9 @@ is_takeover_sysctl_file() {
 }
 
 take_over_sysctl_files() {
-  local backup_dir="$1" report_file="$2" list_file file count=0
+  local backup_dir="$1" list_file file count=0
   list_file="$backup_dir/.network-optimize-taken-over-sysctl-files"
   : > "$list_file"
-  : > "$report_file"
 
   shopt -s nullglob
   for file in /etc/sysctl.d/*.conf; do
@@ -1130,7 +1129,6 @@ take_over_sysctl_files() {
       backup_file "$file" "$backup_dir"
       rm -f -- "$file"
       printf '%s\n' "$file" >> "$list_file"
-      printf '%s\n' "$file" >> "$report_file"
       count=$((count + 1))
       warn "已备份并移交脚本接管 sysctl 配置: $file"
     fi
@@ -1138,8 +1136,33 @@ take_over_sysctl_files() {
   shopt -u nullglob
 
   if (( count == 0 )); then
-    rm -f "$list_file" "$report_file"
+    rm -f "$list_file"
   fi
+}
+
+print_sysctl_takeover_summary() {
+  local backup_dir="$1" list_file path count=0
+  list_file="$backup_dir/.network-optimize-taken-over-sysctl-files"
+
+  printf '\n统一接管 sysctl:\n'
+  printf '  主配置: /etc/sysctl.d/99-network-optimize.conf\n'
+  if [[ ! -s "$list_file" ]]; then
+    printf '  结果: 未发现其它写入脚本负责网络优化参数的 sysctl 文件。\n'
+    return 0
+  fi
+
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    count=$((count + 1))
+  done < "$list_file"
+
+  printf '  结果: 已接管 %d 个其它 sysctl 文件，均已备份。\n' "$count"
+  printf '  回滚: 运行本次输出目录里的 rollback.sh 会恢复这些文件。\n'
+  printf '  列表:\n'
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    printf '    - %s\n' "$path"
+  done < "$list_file"
 }
 
 install_file() {
@@ -1370,7 +1393,6 @@ MODULES_LOAD_OUT="$OUT_DIR/99-network-optimize-modules.conf"
 ROUTE_OUT="$OUT_DIR/network-optimize-route.sh"
 NIC_OUT="$OUT_DIR/network-optimize-nic.sh"
 REPORT_OUT="$OUT_DIR/report.txt"
-SYSCTL_TAKEOVER_REPORT_OUT="$OUT_DIR/taken-over-sysctl-files.txt"
 
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 ln -sfn "$OUT_DIR" "$STATE_DIR/latest" 2>/dev/null || true
@@ -2075,6 +2097,7 @@ idle后慢启动=tcp_slow_start_after_idle 只在本机 TCP 终止且非纯 UDP 
 应用时会备份并移除 /etc/sysctl.d 中其它写入脚本负责网络优化参数的 sysctl 文件，让 /etc/sysctl.d/99-network-optimize.conf 成为唯一主配置。
 匹配方式=不按旧文件名固定判断；只要其它 .conf 写入本脚本负责的 BBR/TCP/UDP/qdisc/buffer/forwarding/rp_filter/conntrack/backlog/RPS/busy_poll/file-max 等 sysctl key，就交给脚本接管。
 保护范围=保留 99-network-optimize.conf、98-wgmimic-required.conf、README 以及 disabled/bak/old/orig/save 文件。
+输出=应用完成后终端直接显示接管摘要和列表，不另生成接管报告文件。
 回滚=rollback.sh 会恢复被接管移除的文件。
 
 [生成文件]
@@ -2086,7 +2109,6 @@ nic=$NIC_OUT
 modprobe=$MODPROBE_OUT
 modules_load=$MODULES_LOAD_OUT
 report=$REPORT_OUT
-sysctl_takeover_report_apply后生成=$SYSCTL_TAKEOVER_REPORT_OUT
 rollback_apply后生成=$OUT_DIR/rollback.sh
 
 [说明]
@@ -2131,7 +2153,7 @@ install_file "$MODPROBE_OUT" /etc/modprobe.d/nf_conntrack.conf 0644 "$BACKUP_DIR
 install_file "$MODULES_LOAD_OUT" /etc/modules-load.d/99-network-optimize.conf 0644 "$BACKUP_DIR"
 install_file "$ROUTE_OUT" /usr/local/sbin/network-optimize-route.sh 0755 "$BACKUP_DIR"
 install_file "$NIC_OUT" /usr/local/sbin/network-optimize-nic.sh 0755 "$BACKUP_DIR"
-take_over_sysctl_files "$BACKUP_DIR" "$SYSCTL_TAKEOVER_REPORT_OUT"
+take_over_sysctl_files "$BACKUP_DIR"
 
 cat > "$OUT_DIR/network-optimize-route.service" <<'EOF'
 [Unit]
@@ -2186,9 +2208,7 @@ print_final_sysctl_status
 
 printf '\n已应用配置。回滚脚本: %s/rollback.sh\n' "$OUT_DIR"
 printf '备份目录: %s\n' "$BACKUP_DIR"
-if [[ -s "$SYSCTL_TAKEOVER_REPORT_OUT" ]]; then
-  printf '已统一接管其它 sysctl 网络优化文件，列表: %s\n' "$SYSCTL_TAKEOVER_REPORT_OUT"
-fi
+print_sysctl_takeover_summary "$BACKUP_DIR"
 if [[ "$CT_NEEDED" == "yes" ]]; then
   printf '如果 nf_conntrack hashsize 发生变化，建议重启系统让它完整生效。\n'
 fi
