@@ -91,6 +91,7 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL
 - 脚本不再全局强写 ECN，保留内核默认策略和对端协商。
 - TCP 协商能力、RTT/重排路径学习、route `initcwnd/initrwnd`、`txqueuelen`、socket 默认缓冲和 keepalive 等默认交给内核、驱动、BBR 和应用自适应。
 - 应用新版配置时，会停用旧版可能残留的 `initcwnd-enforcer.timer`，并清理旧 route 窗口。
+- 应用新版配置时，会备份并移除明确属于旧网络优化覆盖的重复 sysctl 文件，让 `/etc/sysctl.d/99-network-optimize.conf` 成为唯一主配置。当前只匹配 `99-z-codex-*.conf`、仅包含 BBR/fq 两项的 `99-bbr.conf`、以及带本脚本标记且不是主文件的旧 `network-optimize` sysctl 文件；回滚脚本会恢复这些文件。
 - conntrack 会区分连接上限和 hash 表大小：`nf_conntrack_max` 按转发画像、场景、带宽、会话量和内存预算计算，`hashsize` 按连接上限约 `1/8` 写入。
 - 如果检测到 IPv6 默认路由依赖 RA，脚本在开启 IPv6 forwarding 时会给默认网卡写 `accept_ra=2`，避免转发模式下丢失 IPv6 默认路由。
 
