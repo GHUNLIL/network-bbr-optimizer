@@ -1101,69 +1101,38 @@ backup_file() {
   fi
 }
 
-sysctl_file_has_network_optimizer_keys() {
+sysctl_file_has_script_owned_network_keys() {
   local file="$1"
-  grep -Eiq '^[[:space:]]*(net\.core\.default_qdisc|net\.core\.rmem_max|net\.core\.wmem_max|net\.ipv4\.tcp_|net\.ipv4\.udp_|net\.ipv4\.ip_forward|net\.ipv6\.conf\..*forwarding|net\.netfilter\.nf_conntrack|fs\.file-max)[[:space:]]*=' "$file"
+  grep -Eiq '^[[:space:]]*(fs\.file-max|net\.core\.(default_qdisc|rmem_max|wmem_max|rmem_default|wmem_default|optmem_max|somaxconn|flow_limit_table_len|netdev_max_backlog|netdev_budget|netdev_budget_usecs|rps_sock_flow_entries|busy_poll|busy_read)|net\.ipv4\.(tcp_[[:alnum:]_]+|udp_[[:alnum:]_]+|ip_forward|ip_local_port_range|conf\..*\.(rp_filter|accept_source_route|send_redirects|accept_redirects))|net\.ipv6\.conf\..*\.(forwarding|accept_ra|accept_redirects|accept_source_route)|net\.netfilter\.nf_conntrack[[:alnum:]_]*)[[:space:]]*=' "$file"
 }
 
-is_simple_bbr_sysctl_file() {
-  local file="$1"
-  awk -F= '
-    /^[[:space:]]*($|#)/ { next }
-    {
-      key=$1
-      gsub(/[[:space:]]/, "", key)
-      if (key == "net.core.default_qdisc" || key == "net.ipv4.tcp_congestion_control") {
-        seen=1
-        next
-      }
-      bad=1
-    }
-    END { exit (seen && !bad) ? 0 : 1 }
-  ' "$file"
-}
-
-is_dedupable_sysctl_file() {
+is_takeover_sysctl_file() {
   local file="$1" base
   base="$(basename "$file")"
 
   [[ "$file" == "/etc/sysctl.d/99-network-optimize.conf" ]] && return 1
   [[ "$file" == "/etc/sysctl.d/98-wgmimic-required.conf" ]] && return 1
   [[ "$base" == README.* ]] && return 1
-  [[ "$base" == *.disabled* || "$base" == *.bak* || "$base" == *.old ]] && return 1
+  [[ "$base" == *.disabled* || "$base" == *.bak* || "$base" == *.old || "$base" == *.orig* || "$base" == *.save* ]] && return 1
 
-  if [[ "$base" == 99-z-codex-*.conf ]] && sysctl_file_has_network_optimizer_keys "$file"; then
-    return 0
-  fi
-
-  if [[ "$base" == "99-bbr.conf" ]] && is_simple_bbr_sysctl_file "$file"; then
-    return 0
-  fi
-
-  if [[ "$base" == *network-optimize*.conf ]] \
-     && [[ "$file" != "/etc/sysctl.d/99-network-optimize.conf" ]] \
-     && grep -Eiq 'Network BBR Optimizer|由 bbr\.sh|network-bbr-optimizer' "$file"; then
-    return 0
-  fi
-
-  return 1
+  sysctl_file_has_script_owned_network_keys "$file"
 }
 
-dedupe_legacy_sysctl_files() {
+take_over_sysctl_files() {
   local backup_dir="$1" report_file="$2" list_file file count=0
-  list_file="$backup_dir/.network-optimize-deduped-sysctl-files"
+  list_file="$backup_dir/.network-optimize-taken-over-sysctl-files"
   : > "$list_file"
   : > "$report_file"
 
   shopt -s nullglob
   for file in /etc/sysctl.d/*.conf; do
-    if is_dedupable_sysctl_file "$file"; then
+    if is_takeover_sysctl_file "$file"; then
       backup_file "$file" "$backup_dir"
       rm -f -- "$file"
       printf '%s\n' "$file" >> "$list_file"
       printf '%s\n' "$file" >> "$report_file"
       count=$((count + 1))
-      warn "已备份并移除重复 sysctl 覆盖: $file"
+      warn "已备份并移交脚本接管 sysctl 配置: $file"
     fi
   done
   shopt -u nullglob
@@ -1203,11 +1172,11 @@ restore_or_remove /usr/local/sbin/network-optimize-route.sh
 restore_or_remove /usr/local/sbin/network-optimize-nic.sh
 restore_or_remove /etc/systemd/system/network-optimize-route.service
 restore_or_remove /etc/systemd/system/network-optimize-nic.service
-if [[ -f "\$BACKUP_DIR/.network-optimize-deduped-sysctl-files" ]]; then
+if [[ -f "\$BACKUP_DIR/.network-optimize-taken-over-sysctl-files" ]]; then
   while IFS= read -r path; do
     [[ -n "\$path" ]] || continue
     restore_or_remove "\$path"
-  done < "\$BACKUP_DIR/.network-optimize-deduped-sysctl-files"
+  done < "\$BACKUP_DIR/.network-optimize-taken-over-sysctl-files"
 fi
 EOF
   if [[ -n "${SERVICE_NAME:-}" ]]; then
@@ -1401,7 +1370,7 @@ MODULES_LOAD_OUT="$OUT_DIR/99-network-optimize-modules.conf"
 ROUTE_OUT="$OUT_DIR/network-optimize-route.sh"
 NIC_OUT="$OUT_DIR/network-optimize-nic.sh"
 REPORT_OUT="$OUT_DIR/report.txt"
-DEDUP_REPORT_OUT="$OUT_DIR/deduped-sysctl-files.txt"
+SYSCTL_TAKEOVER_REPORT_OUT="$OUT_DIR/taken-over-sysctl-files.txt"
 
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 ln -sfn "$OUT_DIR" "$STATE_DIR/latest" 2>/dev/null || true
@@ -2102,10 +2071,11 @@ idle后慢启动=tcp_slow_start_after_idle 只在本机 TCP 终止且非纯 UDP 
 应用心跳=tcp_keepalive_time/intvl/probes 不写入
 纯落地机网络状态=不强行写 ip_forward=0/rp_filter
 
-[统一去重]
-应用时会备份并移除明确属于旧网络优化覆盖的重复 sysctl 文件，让 /etc/sysctl.d/99-network-optimize.conf 成为唯一主配置。
-匹配范围=99-z-codex-*.conf、仅包含 bbr/fq 的 99-bbr.conf、带本脚本标记且不是主文件的旧 network-optimize sysctl。
-回滚=rollback.sh 会恢复被去重移除的文件。
+[统一接管]
+应用时会备份并移除 /etc/sysctl.d 中其它写入脚本负责网络优化参数的 sysctl 文件，让 /etc/sysctl.d/99-network-optimize.conf 成为唯一主配置。
+匹配方式=不按旧文件名固定判断；只要其它 .conf 写入本脚本负责的 BBR/TCP/UDP/qdisc/buffer/forwarding/rp_filter/conntrack/backlog/RPS/busy_poll/file-max 等 sysctl key，就交给脚本接管。
+保护范围=保留 99-network-optimize.conf、98-wgmimic-required.conf、README 以及 disabled/bak/old/orig/save 文件。
+回滚=rollback.sh 会恢复被接管移除的文件。
 
 [生成文件]
 sysctl=$SYSCTL_OUT
@@ -2116,7 +2086,7 @@ nic=$NIC_OUT
 modprobe=$MODPROBE_OUT
 modules_load=$MODULES_LOAD_OUT
 report=$REPORT_OUT
-dedup_report_apply后生成=$DEDUP_REPORT_OUT
+sysctl_takeover_report_apply后生成=$SYSCTL_TAKEOVER_REPORT_OUT
 rollback_apply后生成=$OUT_DIR/rollback.sh
 
 [说明]
@@ -2161,7 +2131,7 @@ install_file "$MODPROBE_OUT" /etc/modprobe.d/nf_conntrack.conf 0644 "$BACKUP_DIR
 install_file "$MODULES_LOAD_OUT" /etc/modules-load.d/99-network-optimize.conf 0644 "$BACKUP_DIR"
 install_file "$ROUTE_OUT" /usr/local/sbin/network-optimize-route.sh 0755 "$BACKUP_DIR"
 install_file "$NIC_OUT" /usr/local/sbin/network-optimize-nic.sh 0755 "$BACKUP_DIR"
-dedupe_legacy_sysctl_files "$BACKUP_DIR" "$DEDUP_REPORT_OUT"
+take_over_sysctl_files "$BACKUP_DIR" "$SYSCTL_TAKEOVER_REPORT_OUT"
 
 cat > "$OUT_DIR/network-optimize-route.service" <<'EOF'
 [Unit]
@@ -2216,8 +2186,8 @@ print_final_sysctl_status
 
 printf '\n已应用配置。回滚脚本: %s/rollback.sh\n' "$OUT_DIR"
 printf '备份目录: %s\n' "$BACKUP_DIR"
-if [[ -s "$DEDUP_REPORT_OUT" ]]; then
-  printf '已统一去重 sysctl 覆盖文件，列表: %s\n' "$DEDUP_REPORT_OUT"
+if [[ -s "$SYSCTL_TAKEOVER_REPORT_OUT" ]]; then
+  printf '已统一接管其它 sysctl 网络优化文件，列表: %s\n' "$SYSCTL_TAKEOVER_REPORT_OUT"
 fi
 if [[ "$CT_NEEDED" == "yes" ]]; then
   printf '如果 nf_conntrack hashsize 发生变化，建议重启系统让它完整生效。\n'
