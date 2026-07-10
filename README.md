@@ -7,6 +7,10 @@
 推荐使用 `bootstrap.sh` 入口。它会自动下载最新版 `bbr.sh` 并执行；默认会识别中国大陆网络，大陆服务器优先走 GitHub 代理，非大陆服务器优先直连，失败时自动切换备用地址。
 
 ```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh)
+```
+
+```bash
 bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh)
 ```
 
