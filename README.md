@@ -36,6 +36,8 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL
 - 不默认开启应用层 mux / smux / yamux / multiplex。
 - 纯内核转发场景不会默认开启 TCP Fast Open，因为 nftables 转发不终止 TCP 连接，单边开启 TFO 对被转发连接没有实际帮助。
 - 脚本会自动判断 stateful、落地路由、多出口/策略路由、IPv6 RA、本机是否终止 TCP、RPS、TFO、busy_poll 和会话表强度；分类只表达网络角色，不按云厂商或业务面板判断。
+- FQ 仅在 `tc -s` 已有实测压力证据时放宽，并将生成前核心参数写入网卡脚本用于回滚，同时保存完整 qdisc 快照。
+- 目标带宽达到 300 Mbps 且只有 1 vCPU 时，UDP 中继报告会给出 CPU/PPS 容量告警，不用扩大缓冲掩盖算力上限。
 
 ## 运行参数
 
@@ -47,12 +49,42 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL
 | `--dry-run` | 只生成配置文件，不应用到系统 |
 | `--apply` | 生成配置后默认询问是否应用 |
 | `--wgmimic-required` | 只应用 WireGuard / Mimic 隧道必需 sysctl，不做完整网络优化 |
+| `--relay-audit` | 只读审计 UDP socket、FQ、Mimic XDP、CPU 和队列瓶颈 |
+| `--mimic-native` | 对 virtio_net 上已有 Mimic 做 native XDP 安全尝试，验证失败自动回滚 |
 | `--china-whitelist` | 拉取并运行 `GHUNLIL/china-region-whitelist` 地区白名单脚本 |
 | `--out-dir DIR` | 指定输出目录 |
 | `--clean-outputs` | 清理旧版 `bbr-output-*` 和 `/root/network-optimize-backup-*` 目录 |
 | `--help` | 查看脚本帮助 |
 
 如果需要调整 GitHub 访问方式，可以在运行前设置 `BBR_GITHUB_PROXY`：`direct` 表示强制直连，也可以填入自定义代理前缀，例如 `https://gh-proxy.com/`。
+
+## 实测型 ForwardX / Mimic 优化
+
+先运行只读审计，不会修改服务、qdisc 或 sysctl：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --relay-audit
+```
+
+审计会显示默认网卡、驱动、CPU/RX/TX 队列、Mimic 配置和实际 XDP 模式、UDP/IP 丢弃计数，以及 `tc -s` 中的 `dropped/flows_plimit` 证据。累计计数只用于定位候选层，最终仍应使用相同方向、速率和包长做负载窗口 A/B。
+
+如果审计发现 virtio_net 上的 Mimic 被强制为 `xdp_mode = skb`，可先生成变更计划：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --mimic-native --dry-run
+```
+
+确认后应用：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/GHUNLIL/network-bbr-optimizer/main/bootstrap.sh) --mimic-native --apply
+```
+
+该操作只默认接受已验证的 `virtio_net` 候选，备份 `/etc/mimic/<接口>.conf`，短暂重启对应的 `mimic@<接口>.service`，并同时验证服务为 active、运行态确实显示 native XDP。任何一步失败都会立即恢复原配置并重启服务；输出目录还会生成独立回滚脚本。
+
+完整优化模式也会读取现有 `fq` qdisc。只有生成时已经看到 `dropped/flows_plimit`，或队列已经使用已验证的放宽画像，才会把对应 root/多队列子 qdisc 持久化为 `limit 100000 / flow_limit 1000 / buckets 4096`。其它队列保持原值，回滚时恢复生成前记录的三个核心参数，完整原始状态保存在 `qdisc-before.txt`。这样可以修复高带宽单 UDP 流触发的 `flows_plimit`，不会把所有机器一律改成大队列。
+
+> 1 vCPU 的 Mimic/FXP 在高 PPS 下常先撞到 CPU、system 和 softirq 上限。native XDP 可以降低一部分开销，但无法创造额外 CPU 容量；如果负载期间 CPU 已持续 100%，继续放大 socket、backlog 或 conntrack 通常不能把 540 Mbps 变成低丢包。应先降低限速/包速，或升级到至少 2 vCPU 后重新测量。
 
 ## 交互菜单
 
@@ -88,12 +120,14 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GHUNLIL
 
 脚本应用实时配置前会生成回滚文件。
 
+`--mimic-native` 会额外生成 `mimic-native-plan.txt` 和 `rollback-mimic-native.sh`。
+
 ## 关键行为
 
 - BBR1 / 未知内核都会尝试启用 `bbr` 拥塞控制。
 - 脚本会尝试加载 `tcp_bbr` 和 `sch_fq` 模块，并写入 `/etc/modules-load.d/99-network-optimize.conf` 让它们开机加载。
 - 脚本不再全局强写 ECN，保留内核默认策略和对端协商。
-- TCP 协商能力、RTT/重排路径学习、route `initcwnd/initrwnd`、`txqueuelen`、socket 默认缓冲和 keepalive 等默认交给内核、驱动、BBR 和应用自适应。
+- TCP 协商能力、RTT/重排路径学习、route `initcwnd/initrwnd`、`txqueuelen`、socket 默认缓冲和 keepalive 等默认交给内核、驱动、BBR 和应用自适应；UDP socket 出现丢包时先区分应用读取速度、CPU 和路径，不盲目提高全局默认缓冲。
 - 应用新版配置时，会停用旧版可能残留的 `initcwnd-enforcer.timer`，并清理旧 route 窗口。
 - 应用新版配置时，会备份并移除 `/etc/sysctl.d` 中其它写入本脚本负责网络优化参数的 sysctl 文件，并备份后注释 `/etc/sysctl.conf` 中脚本负责的单行，让 `/etc/sysctl.d/99-network-optimize.conf` 成为唯一主配置。匹配按 sysctl key 自动识别，不按旧文件名写死；`98-wgmimic-required.conf`、README、以及 disabled/bak/old/orig/save 文件会保留。接管结果会直接显示在终端总结里，不需要查看单独报告文件，回滚脚本会恢复被接管移除/注释前的文件。
 - conntrack 会区分连接上限和 hash 表大小：`nf_conntrack_max` 按转发画像、场景、带宽、会话量和内存预算计算，`hashsize` 按连接上限约 `1/8` 写入。
