@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2026.07.01.2"
+VERSION="2026.07.10.1"
 MIB=1048576
 AUTO_TCP_CAP=$((2047 * MIB))
 
@@ -34,6 +34,8 @@ OUT_DIR_AUTO="no"
 CLEAN_OUTPUTS="no"
 DRAFT_DIRTY="no"
 WGMIMIC_REQUIRED_ONLY="no"
+RELAY_AUDIT_ONLY="no"
+MIMIC_NATIVE_ONLY="no"
 CHINA_WHITELIST_ONLY="no"
 CHINA_WHITELIST_RAW_BASE="${CHINA_WHITELIST_RAW_BASE:-https://raw.githubusercontent.com/GHUNLIL/china-region-whitelist/main}"
 CHINA_WHITELIST_ENTRYPOINT="${CHINA_WHITELIST_ENTRYPOINT:-bootstrap.sh}"
@@ -607,6 +609,8 @@ Network BBR Optimizer / 中文 BBR 网络优化器 bbr.sh
   bash bbr.sh --dry-run   # 只生成配置文件，不应用
   bash bbr.sh --apply     # 生成后默认询问应用
   bash bbr.sh --wgmimic-required  # 只生成/应用 WG/Mimic 必需 sysctl
+  bash bbr.sh --relay-audit       # 只读审计 UDP/FQ/Mimic/CPU 瓶颈
+  bash bbr.sh --mimic-native      # 安全尝试 Mimic native XDP，失败自动回滚
   bash bbr.sh --china-whitelist   # 拉取并运行 china-region-whitelist
   bash bbr.sh --out-dir DIR       # 指定输出目录
   bash bbr.sh --clean-outputs     # 清理旧版 bbr-output-* 和 /root/network-optimize-backup-* 目录
@@ -639,6 +643,8 @@ while [[ $# -gt 0 ]]; do
     --dry-run) APPLY_MODE="no" ;;
     --apply) APPLY_MODE="yes" ;;
     --wgmimic-required|--wgmimic-sysctl|--wg-mimic-sysctl) WGMIMIC_REQUIRED_ONLY="yes" ;;
+    --relay-audit|--udp-path-audit) RELAY_AUDIT_ONLY="yes" ;;
+    --mimic-native|--mimic-native-xdp) MIMIC_NATIVE_ONLY="yes" ;;
     --china-whitelist|--china-region-whitelist|--whitelist) CHINA_WHITELIST_ONLY="yes" ;;
     --out-dir)
       shift
@@ -1014,6 +1020,128 @@ cpu_count() {
   nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || printf '1'
 }
 
+nic_driver() {
+  local iface="$1" driver=""
+  if command -v ethtool >/dev/null 2>&1; then
+    driver="$(ethtool -i "$iface" 2>/dev/null | awk '$1 == "driver:" { print $2; exit }')"
+  fi
+  if [[ -z "$driver" && -L "/sys/class/net/$iface/device/driver" ]]; then
+    driver="$(basename "$(readlink -f "/sys/class/net/$iface/device/driver")")"
+  fi
+  printf '%s' "${driver:-unknown}"
+}
+
+mimic_config_for_iface() {
+  local iface="$1" config
+  config="/etc/mimic/${iface}.conf"
+  [[ -f "$config" ]] && printf '%s' "$config"
+}
+
+mimic_configured_xdp_mode() {
+  local config="$1"
+  awk -F= '/^[[:space:]]*xdp_mode[[:space:]]*=/ {
+    gsub(/[[:space:]]/, "", $2); print $2; found=1; exit
+  } END { if (!found) print "auto" }' "$config" 2>/dev/null
+}
+
+xdp_runtime_mode() {
+  local iface="$1" first
+  command -v ip >/dev/null 2>&1 || { printf 'unknown'; return; }
+  first="$(ip -details link show dev "$iface" 2>/dev/null | head -n 1)"
+  if [[ "$first" == *" xdpgeneric "* ]]; then
+    printf 'skb'
+  elif [[ "$first" == *" xdp "* ]]; then
+    printf 'native'
+  else
+    printf 'none'
+  fi
+}
+
+detect_fq_tuning_records() {
+  local iface="$1"
+  command -v tc >/dev/null 2>&1 || return 0
+  tc -s -d qdisc show dev "$iface" 2>/dev/null | awk '
+    function number(value) { gsub(/[^0-9]/, "", value); return value + 0 }
+    function emit(    reason) {
+      if (kind != "fq" || target == "") return
+      reason=""
+      if (flows_plimit > 0 || drops > 0) reason="measured-pressure"
+      else if (limit >= 100000 && flow_limit >= 1000 && buckets >= 4096) reason="existing-profile"
+      if (reason != "") {
+        if (limit <= 0) limit=10000
+        if (flow_limit <= 0) flow_limit=100
+        if (buckets <= 0) buckets=1024
+        printf "%s|%d|%d|%d|%s\n", target, limit, flow_limit, buckets, reason
+      }
+    }
+    /^qdisc / {
+      emit()
+      kind=$2; target=""; limit=0; flow_limit=0; buckets=0; drops=0; flows_plimit=0
+      for (i=1; i<=NF; i++) {
+        if ($i == "root") target="root"
+        else if ($i == "parent") target="parent:" $(i+1)
+        else if ($i == "limit") limit=number($(i+1))
+        else if ($i == "flow_limit") flow_limit=number($(i+1))
+        else if ($i == "buckets") buckets=number($(i+1))
+      }
+      next
+    }
+    {
+      if (match($0, /dropped [0-9]+/)) drops=number(substr($0, RSTART, RLENGTH))
+      if (match($0, /flows_plimit [0-9]+/)) flows_plimit=number(substr($0, RSTART, RLENGTH))
+    }
+    END { emit() }
+  '
+}
+
+run_relay_audit() {
+  local iface cpu rx tx driver config="" configured="not-installed" runtime records="" udp_errors=""
+  need_linux
+  iface="$(detect_default_iface)"
+  iface="${iface:-eth0}"
+  cpu="$(cpu_count)"
+  rx="$(count_queues "$iface" rx)"
+  tx="$(count_queues "$iface" tx)"
+  driver="$(nic_driver "$iface")"
+  config="$(mimic_config_for_iface "$iface")"
+  if [[ -n "$config" ]]; then
+    configured="$(mimic_configured_xdp_mode "$config")"
+  fi
+  runtime="$(xdp_runtime_mode "$iface")"
+  records="$(detect_fq_tuning_records "$iface")"
+  if command -v nstat >/dev/null 2>&1; then
+    udp_errors="$(nstat -az 2>/dev/null | awk '$1 ~ /^(UdpRcvbufErrors|UdpSndbufErrors|IpInDiscards|IpOutDiscards)$/ { printf "  %-24s %s\n", $1, $2 }')"
+  fi
+
+  printf 'ForwardX / Mimic / UDP 只读审计\n'
+  printf '  网卡=%s 驱动=%s CPU=%s RX队列=%s TX队列=%s\n' "$iface" "$driver" "$cpu" "$rx" "$tx"
+  printf '  Mimic配置=%s 运行XDP=%s\n' "$configured" "$runtime"
+  if [[ -n "$udp_errors" ]]; then
+    printf '%s\n' "$udp_errors"
+  fi
+  printf '\nqdisc 证据:\n'
+  if [[ -n "$records" ]]; then
+    printf '%s\n' "$records" | sed 's/^/  /'
+  else
+    printf '  未检测到 fq dropped/flows_plimit 增长，也没有已持久化的放宽画像。\n'
+  fi
+  if command -v tc >/dev/null 2>&1; then
+    tc -s qdisc show dev "$iface" 2>/dev/null || true
+  fi
+
+  printf '\n判断:\n'
+  if (( cpu <= 1 )); then
+    printf '  - 只有 1 vCPU：高 PPS 的 Mimic/FXP 链路很容易先撞到 CPU/softirq 上限；放大 sysctl 缓冲不能创造 CPU 容量。\n'
+  fi
+  if [[ "$configured" == "skb" && "$driver" == "virtio_net" ]]; then
+    printf '  - virtio_net 当前强制 skb XDP，可用 --mimic-native 做带自动回滚的 native XDP 尝试。\n'
+  fi
+  if [[ -n "$records" ]]; then
+    printf '  - fq 已有实测压力或已存在验证画像；完整优化只处理这些 fq 队列，并保存生成时参数用于回滚。\n'
+  fi
+  printf '  - 必须用同方向、同速率 A/B 复测；不要把累计 UdpRcvbufErrors 或公网 iperf 波动直接归因于线路。\n'
+}
+
 cpumask_all() {
   local cpus="$1" full rem i lower=() upper
   (( cpus < 1 )) && cpus=1
@@ -1256,6 +1384,9 @@ restore_or_remove() {
     rm -f "\$path"
   fi
 }
+if [[ -x /usr/local/sbin/network-optimize-nic.sh ]]; then
+  /usr/local/sbin/network-optimize-nic.sh rollback || true
+fi
 restore_or_remove /etc/sysctl.d/99-network-optimize.conf
 restore_or_remove /etc/security/limits.d/99-network-optimize.conf
 restore_or_remove /etc/systemd/system.conf.d/99-network-optimize.conf
@@ -1385,6 +1516,122 @@ apply_wgmimic_required_sysctl() {
   printf '备份目录: %s\n' "$backup_dir"
 }
 
+apply_mimic_native_tuning() {
+  local iface config driver service configured runtime out_dir backup_dir do_apply temp rollback
+  local forwardx_was_active="no" fxp_before=0 fxp_after=0 validation_failed="no"
+  need_linux
+  command -v systemctl >/dev/null 2>&1 || die "--mimic-native 需要 systemd 管理 mimic@.service"
+  command -v ip >/dev/null 2>&1 || die "--mimic-native 需要 iproute2"
+  iface="$(detect_default_iface)"
+  iface="${iface:-eth0}"
+  config="$(mimic_config_for_iface "$iface")"
+  [[ -n "$config" ]] || die "未找到 /etc/mimic/${iface}.conf；不会猜测或修改其它接口"
+  service="mimic@${iface}.service"
+  systemctl cat "$service" >/dev/null 2>&1 || die "未找到 $service"
+  driver="$(nic_driver "$iface")"
+  configured="$(mimic_configured_xdp_mode "$config")"
+  runtime="$(xdp_runtime_mode "$iface")"
+  if systemctl is-active --quiet forwardx-agent.service 2>/dev/null; then
+    forwardx_was_active="yes"
+  fi
+  if command -v pgrep >/dev/null 2>&1; then
+    fxp_before="$(pgrep -c forwardx-fxp 2>/dev/null || true)"
+    fxp_before="${fxp_before:-0}"
+  fi
+
+  if [[ "$configured" == "native" && "$runtime" == "native" ]] && systemctl is-active --quiet "$service"; then
+    log "Mimic 已在 $iface 使用 native XDP，无需修改。"
+    return 0
+  fi
+  if [[ "$driver" != "virtio_net" && "${MIMIC_NATIVE_ALLOW_UNLISTED:-no}" != "yes" ]]; then
+    die "网卡驱动=$driver，不在已验证的 virtio_net 候选范围；如已自行验证，可设置 MIMIC_NATIVE_ALLOW_UNLISTED=yes"
+  fi
+
+  if [[ -n "${OUT_DIR:-}" ]]; then
+    out_dir="$OUT_DIR"
+  else
+    out_dir="$STATE_DIR/runs/${TS}-mimic-native"
+  fi
+  backup_dir="$STATE_DIR/backups/${TS}-mimic-native"
+  mkdir -p "$out_dir"
+  {
+    printf 'Mimic native XDP 变更计划\n'
+    printf 'interface=%s\n' "$iface"
+    printf 'driver=%s\n' "$driver"
+    printf 'config=%s\n' "$config"
+    printf 'configured_before=%s\n' "$configured"
+    printf 'runtime_before=%s\n' "$runtime"
+    printf 'verify=Mimic active、native XDP、原有 ForwardX agent/FXP 仍存活；否则立即恢复原配置\n'
+  } | tee "$out_dir/mimic-native-plan.txt"
+
+  if [[ "$APPLY_MODE" == "no" ]]; then
+    log "dry-run 模式：未修改 Mimic。"
+    return 0
+  fi
+  is_root || die "--mimic-native 应用阶段需要 root"
+  if [[ "$APPLY_MODE" == "yes" ]]; then
+    do_apply="yes"
+  else
+    do_apply=$(ask_yes_no "将 $iface 的 Mimic 从 $configured 切换为 native XDP 吗（服务会短暂重启，失败自动回滚）" "no")
+  fi
+  [[ "$do_apply" == "yes" ]] || { log "未应用 Mimic native XDP。"; return 0; }
+
+  mkdir -p "$backup_dir"
+  backup_file "$config" "$backup_dir"
+  temp="$out_dir/$(basename "$config").native"
+  awk '
+    /^[[:space:]]*xdp_mode[[:space:]]*=/ { print "xdp_mode = native"; replaced=1; next }
+    { print }
+    END { if (!replaced) print "xdp_mode = native" }
+  ' "$config" > "$temp"
+  install -m "$(stat -c '%a' "$config" 2>/dev/null || printf '644')" "$temp" "$config"
+
+  rollback="$out_dir/rollback-mimic-native.sh"
+  cat > "$rollback" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cp -a "$backup_dir$config" "$config"
+systemctl restart "$service"
+systemctl is-active "$service"
+EOF
+  chmod +x "$rollback"
+
+  systemctl restart "$service" || validation_failed="yes"
+  systemctl is-active --quiet "$service" || validation_failed="yes"
+  [[ "$(xdp_runtime_mode "$iface")" == "native" ]] || validation_failed="yes"
+  if [[ "$forwardx_was_active" == "yes" ]] && ! systemctl is-active --quiet forwardx-agent.service; then
+    validation_failed="yes"
+  fi
+  if command -v pgrep >/dev/null 2>&1; then
+    fxp_after="$(pgrep -c forwardx-fxp 2>/dev/null || true)"
+    fxp_after="${fxp_after:-0}"
+    if (( fxp_before > 0 && fxp_after <= 0 )); then
+      validation_failed="yes"
+    fi
+  fi
+  if [[ "$validation_failed" == "yes" ]]; then
+    warn "native XDP 未成功，立即恢复原 Mimic 配置。"
+    cp -a "$backup_dir$config" "$config"
+    systemctl restart "$service" || true
+    die "Mimic native XDP 验证失败，已回滚"
+  fi
+
+  printf '\nMimic native XDP 已生效：\n'
+  printf '  interface=%s driver=%s configured=%s runtime=%s\n' \
+    "$iface" "$driver" "$(mimic_configured_xdp_mode "$config")" "$(xdp_runtime_mode "$iface")"
+  printf '  service=%s backup=%s rollback=%s\n' "$service" "$backup_dir" "$rollback"
+  if systemctl is-active --quiet forwardx-agent.service 2>/dev/null; then
+    printf '  forwardx-agent=active\n'
+  fi
+}
+
+if [[ "${BBR_LIBRARY_ONLY:-no}" == "yes" ]]; then
+  if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+  fi
+  exit 0
+fi
+
 need_linux
 
 TS="$(date +%Y%m%d-%H%M%S)"
@@ -1394,6 +1641,16 @@ if [[ "$CLEAN_OUTPUTS" == "yes" ]]; then
 fi
 
 STATE_DIR="$(default_state_dir)"
+
+if [[ "$RELAY_AUDIT_ONLY" == "yes" ]]; then
+  run_relay_audit
+  exit 0
+fi
+
+if [[ "$MIMIC_NATIVE_ONLY" == "yes" ]]; then
+  apply_mimic_native_tuning
+  exit 0
+fi
 
 if [[ "$WGMIMIC_REQUIRED_ONLY" == "yes" ]]; then
   apply_wgmimic_required_sysctl
@@ -1413,6 +1670,11 @@ DEFAULT_IFACE=$(detect_default_iface)
 DEFAULT_IFACE="${DEFAULT_IFACE:-eth0}"
 RX_QUEUES=$(count_queues "$DEFAULT_IFACE" rx)
 TX_QUEUES=$(count_queues "$DEFAULT_IFACE" tx)
+FQ_TUNE_RECORDS="$(detect_fq_tuning_records "$DEFAULT_IFACE")"
+FQ_TUNE_TARGET_COUNT=0
+if [[ -n "$FQ_TUNE_RECORDS" ]]; then
+  FQ_TUNE_TARGET_COUNT="$(printf '%s\n' "$FQ_TUNE_RECORDS" | awk 'NF { count++ } END { print count + 0 }')"
+fi
 
 ROLE="forwarding"
 SCENE="relay"
@@ -1466,6 +1728,13 @@ MODULES_LOAD_OUT="$OUT_DIR/99-network-optimize-modules.conf"
 ROUTE_OUT="$OUT_DIR/network-optimize-route.sh"
 NIC_OUT="$OUT_DIR/network-optimize-nic.sh"
 REPORT_OUT="$OUT_DIR/report.txt"
+QDISC_SNAPSHOT_OUT="$OUT_DIR/qdisc-before.txt"
+
+if command -v tc >/dev/null 2>&1; then
+  tc -s -d qdisc show dev "$DEFAULT_IFACE" > "$QDISC_SNAPSHOT_OUT" 2>/dev/null || : > "$QDISC_SNAPSHOT_OUT"
+else
+  printf 'tc 不可用，未生成 qdisc 快照。\n' > "$QDISC_SNAPSHOT_OUT"
+fi
 
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 ln -sfn "$OUT_DIR" "$STATE_DIR/latest" 2>/dev/null || true
@@ -1596,6 +1865,11 @@ DOWN_BDP=$((DOWN_MBPS * DOWN_RTT * 125))
 BDP=$(max "$UP_BDP" "$DOWN_BDP")
 MBW=$(max "$UP_MBPS" "$DOWN_MBPS")
 MAXRTT=$(max "$UP_RTT" "$DOWN_RTT")
+UDP_CPU_WARNING="no"
+if (( CPU_COUNT <= 1 && MBW >= 300 )) && [[ "$BUSINESS" == "udp_game" || "$BUSINESS" == "mixed" ]] \
+   && [[ "$SCENE" == "relay" || "$SCENE" == "ix" || "$SCENE" == "hybrid" || "$ROLE" == "landing" ]]; then
+  UDP_CPU_WARNING="yes"
+fi
 
 if [[ "$BUSINESS" == "udp_game" ]]; then
   if [[ "$BBR_KIND" == "bbr3" ]]; then
@@ -2063,16 +2337,68 @@ IFACE="${DEFAULT_IFACE}"
 RPS_ENABLE="$RPS_ENABLE"
 RPS_CPUS="$RPS_CPUS"
 RPS_FLOW_CNT="$RPS_FLOW_CNT"
-if [[ -d "/sys/class/net/\$IFACE" ]]; then
-  if [[ "\$RPS_ENABLE" == "yes" ]]; then
-    for f in /sys/class/net/"\$IFACE"/queues/rx-*/rps_cpus; do
-      [[ -e "\$f" ]] && printf '%s' "\$RPS_CPUS" > "\$f" || true
-    done
-    for f in /sys/class/net/"\$IFACE"/queues/rx-*/rps_flow_cnt; do
-      [[ -e "\$f" ]] && printf '%s' "\$RPS_FLOW_CNT" > "\$f" || true
-    done
+FQ_TUNE_RECORDS=$(printf '%q' "$FQ_TUNE_RECORDS")
+EOF
+cat >> "$NIC_OUT" <<'EOF'
+
+apply_rps() {
+  [[ -d "/sys/class/net/$IFACE" ]] || return 0
+  [[ "$RPS_ENABLE" == "yes" ]] || return 0
+  local f
+  for f in /sys/class/net/"$IFACE"/queues/rx-*/rps_cpus; do
+    [[ -e "$f" ]] && printf '%s' "$RPS_CPUS" > "$f" || true
+  done
+  for f in /sys/class/net/"$IFACE"/queues/rx-*/rps_flow_cnt; do
+    [[ -e "$f" ]] && printf '%s' "$RPS_FLOW_CNT" > "$f" || true
+  done
+}
+
+replace_fq() {
+  local target="$1" limit="$2" flow_limit="$3" buckets="$4"
+  if [[ "$target" == "root" ]]; then
+    tc qdisc replace dev "$IFACE" root fq limit "$limit" flow_limit "$flow_limit" buckets "$buckets"
+  else
+    tc qdisc replace dev "$IFACE" parent "${target#parent:}" fq limit "$limit" flow_limit "$flow_limit" buckets "$buckets"
   fi
-fi
+}
+
+restore_fq_tuning() {
+  [[ -n "$FQ_TUNE_RECORDS" ]] || return 0
+  command -v tc >/dev/null 2>&1 || return 0
+  local target limit flow_limit buckets reason
+  while IFS='|' read -r target limit flow_limit buckets reason; do
+    [[ -n "$target" ]] || continue
+    replace_fq "$target" "$limit" "$flow_limit" "$buckets" || true
+  done <<< "$FQ_TUNE_RECORDS"
+}
+
+apply_fq_tuning() {
+  [[ -n "$FQ_TUNE_RECORDS" ]] || return 0
+  command -v tc >/dev/null 2>&1 || return 0
+  local target old_limit old_flow_limit old_buckets reason
+  while IFS='|' read -r target old_limit old_flow_limit old_buckets reason; do
+    [[ -n "$target" ]] || continue
+    if ! replace_fq "$target" 100000 1000 4096; then
+      printf 'fq 调优失败，恢复生成时记录的 qdisc 参数。\n' >&2
+      restore_fq_tuning
+      return 1
+    fi
+  done <<< "$FQ_TUNE_RECORDS"
+}
+
+case "${1:-apply}" in
+  apply)
+    apply_rps
+    apply_fq_tuning
+    ;;
+  rollback)
+    restore_fq_tuning
+    ;;
+  *)
+    printf '用法: %s [apply|rollback]\n' "$0" >&2
+    exit 2
+    ;;
+esac
 EOF
 chmod +x "$NIC_OUT"
 
@@ -2125,9 +2451,12 @@ busy_poll=${BUSY_POLL:-系统默认（不写入）}
 RPS启用=$RPS_ENABLE
 RPS_CPU掩码=$RPS_CPUS
 RPS单队列流表=$RPS_FLOW_CNT
+fq实测调优目标数=$FQ_TUNE_TARGET_COUNT
+fq实测调优记录=${FQ_TUNE_RECORDS:-无；不会盲目放大 qdisc}
 会话表并发强度_输入=$(choice_short_label "$CONCURRENCY_MODE")
 会话表实际强度=$(choice_short_label "$CONCURRENCY_EFFECTIVE")
 队列抖动保护=$QUEUE_JITTER_GUARD
+单核高PPS告警=$UDP_CPU_WARNING
 低带宽初始窗口保护=交给内核自适应（不写 route initcwnd/initrwnd）
 需要conntrack=$CT_NEEDED
 模块开机加载=tcp_bbr, sch_fq
@@ -2182,16 +2511,20 @@ nic=$NIC_OUT
 modprobe=$MODPROBE_OUT
 modules_load=$MODULES_LOAD_OUT
 report=$REPORT_OUT
+qdisc生成前快照=$QDISC_SNAPSHOT_OUT
 rollback_apply后生成=$OUT_DIR/rollback.sh
 
 [说明]
 应用层_mux_multiplex=不会开启
+fq调优原则=只在 tc -s 已出现 dropped/flows_plimit，或当前已是已验证放宽画像时持久化；自动回滚恢复生成时记录的 limit/flow_limit/buckets，完整原始状态保存在 qdisc-before.txt。
+Mimic_native_XDP=使用 --mimic-native 单独执行；仅默认接受 virtio_net，服务或 native XDP 验证失败会立即恢复。
+高PPS容量=1 vCPU 上的 Mimic/FXP 吞吐上限通常是 CPU/softirq，不会用放大 socket/sysctl 缓冲伪装成已修复。
 复制这份报告给 Codex，可检查输入、自动选择和生成参数是否合理。
 EOF
 
 printf '\n已生成文件:\n'
 printf '  %s\n' "$SYSCTL_OUT" "$LIMITS_OUT" "$SYSTEMD_OUT" "$ROUTE_OUT" "$NIC_OUT" "$REPORT_OUT"
-printf '  %s\n' "$MODPROBE_OUT" "$MODULES_LOAD_OUT"
+printf '  %s\n' "$MODPROBE_OUT" "$MODULES_LOAD_OUT" "$QDISC_SNAPSHOT_OUT"
 [[ -n "${SERVICE_DROPIN:-}" ]] && printf '  %s\n' "$SERVICE_DROPIN"
 
 if [[ "$APPLY_MODE" == "no" ]]; then
@@ -2243,13 +2576,15 @@ WantedBy=multi-user.target
 EOF
 cat > "$OUT_DIR/network-optimize-nic.service" <<'EOF'
 [Unit]
-Description=应用网络优化网卡 RPS
+Description=应用基于实测证据的网卡 RPS/FQ 优化
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/network-optimize-nic.sh
+ExecStop=/usr/local/sbin/network-optimize-nic.sh rollback
+RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
@@ -2270,7 +2605,8 @@ sync_conntrack_hashsize_live
 systemctl daemon-reexec 2>/dev/null || true
 systemctl daemon-reload 2>/dev/null || true
 systemctl enable --now network-optimize-route.service 2>/dev/null || true
-systemctl enable --now network-optimize-nic.service 2>/dev/null || true
+systemctl enable network-optimize-nic.service 2>/dev/null || true
+systemctl restart network-optimize-nic.service 2>/dev/null || true
 
 printf '\n本次输入、自动选择和生成参数报告（可整段复制给 Codex 检查）：\n'
 printf '%s\n' '------------------------------------------------------------'
